@@ -188,6 +188,12 @@ Results are saved as JSON:
 
 > **Note:** TrueSpec uses BitTorrent traffic to fetch torrent fragments. It is not recommended to run it on VPS or servers with limited/metered bandwidth, as scan volume can add up quickly.
 
+## About TorrentClaw
+
+[TorrentClaw](https://torrentclaw.com) is an open platform focused on improving the quality and reliability of torrent metadata. Our mission is to make torrent search engines more accurate and the torrent ecosystem healthier — by building tools that verify, enrich, and standardize metadata across the network.
+
+TrueSpec is the first open-source tool in the TorrentClaw ecosystem.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
