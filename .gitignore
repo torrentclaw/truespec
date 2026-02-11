@@ -30,6 +30,9 @@ desktop.ini
 # Output
 results_*.json
 
+# Lefthook
+lefthook-local.yml
+
 # Environment
 .env
 .env.local

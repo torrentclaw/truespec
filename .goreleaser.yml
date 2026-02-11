@@ -32,3 +32,6 @@ changelog:
       - "^docs:"
       - "^test:"
       - "^chore:"
+      - "^ci:"
+      - "^build:"
+      - "^style:"

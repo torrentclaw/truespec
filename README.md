@@ -167,8 +167,11 @@ Results are saved as JSON:
 │   └── hashes.txt           # Sample info hashes
 ├── .github/
 │   └── workflows/
-│       └── release.yml      # CI/CD release pipeline
+│       ├── ci.yml           # PR validation (commit lint, build, test)
+│       └── release.yml      # Release pipeline (goreleaser)
 ├── .goreleaser.yml          # Cross-platform build config
+├── lefthook.yml             # Git hooks (commit lint, gofmt, govet)
+├── Makefile                 # Dev workflow (build, test, lint, release)
 ├── LICENSE                  # AGPL-3.0
 ├── CONTRIBUTING.md          # Contribution guidelines
 └── README.md

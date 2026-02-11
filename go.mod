@@ -1,6 +1,6 @@
 module github.com/torrentclaw/truespec
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/RoaringBitmap/roaring v1.2.3 // indirect

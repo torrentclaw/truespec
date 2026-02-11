@@ -6,26 +6,40 @@ Thanks for your interest in contributing! Here's how you can help.
 
 1. Fork the repository
 2. Clone your fork: `git clone https://github.com/<your-user>/truespec.git`
-3. Create a branch: `git checkout -b feat/my-feature`
-4. Make your changes
-5. Test locally: `go build ./cmd/truespec`
-6. Commit with a clear message (see below)
-7. Push and open a Pull Request
+3. Install dev tools and git hooks:
+   ```bash
+   make install-tools
+   make hooks
+   ```
+4. Create a branch: `git checkout -b feat/my-feature`
+5. Make your changes
+6. Test locally: `make build && make test`
+7. Commit with a clear message (see below) — the commit-msg hook will validate the format
+8. Push and open a Pull Request
 
 ## Requirements
 
 - Go 1.25+
 - `ffprobe` installed (from FFmpeg)
+- [lefthook](https://github.com/evilmartians/lefthook) (installed via `make install-tools`)
 
 ## Commit Messages
 
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
+Commits are validated automatically by a git hook. We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
+<type>[optional scope][!]: <description>
+```
+
+Valid types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
+
+Examples:
+```
 feat: add new audio codec detection
-fix: correct HDR10 detection for MKV files
+fix(scanner): correct HDR10 detection for MKV files
 docs: update README examples
 refactor: simplify piece selection logic
+feat!: redesign output format
 ```
 
 ## Code Style

@@ -1,0 +1,40 @@
+commit-msg:
+  commands:
+    validate:
+      run: |
+        msg=$(head -1 {1})
+        if ! echo "$msg" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .{1,}$'; then
+          echo ""
+          echo "ERROR: Invalid commit message format."
+          echo ""
+          echo "  Got: $msg"
+          echo ""
+          echo "  Expected: <type>[optional scope][!]: <description>"
+          echo ""
+          echo "  Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+          echo "  Examples:"
+          echo "    feat: add new audio codec detection"
+          echo "    fix(scanner): correct HDR10 detection for MKV files"
+          echo "    feat!: redesign output format"
+          echo ""
+          exit 1
+        fi
+
+pre-commit:
+  parallel: true
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: test -z "$(gofmt -l {staged_files})" || (echo "Run gofmt on:" && gofmt -l {staged_files} && exit 1)
+    govet:
+      glob: "*.go"
+      run: go vet ./...
+    gobuild:
+      glob: "*.go"
+      run: go build ./...
+
+pre-push:
+  commands:
+    gotest:
+      glob: "*.go"
+      run: go test ./...
