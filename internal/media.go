@@ -19,21 +19,21 @@ type ffprobeOutput struct {
 }
 
 type ffprobeStream struct {
-	CodecType       string            `json:"codec_type"`
-	CodecName       string            `json:"codec_name"`
-	Profile         string            `json:"profile"`
-	Channels        int               `json:"channels"`
-	Width           int               `json:"width"`
-	Height          int               `json:"height"`
-	BitsPerRaw      string            `json:"bits_per_raw_sample"`
-	PixFmt          string            `json:"pix_fmt"`
-	ColorSpace      string            `json:"color_space"`
-	ColorTransfer   string            `json:"color_transfer"`
-	ColorPrimaries  string            `json:"color_primaries"`
-	RFrameRate      string            `json:"r_frame_rate"`
-	Tags            map[string]string `json:"tags"`
-	Disposition     map[string]int    `json:"disposition"`
-	SideDataList    []sideData        `json:"side_data_list"`
+	CodecType      string            `json:"codec_type"`
+	CodecName      string            `json:"codec_name"`
+	Profile        string            `json:"profile"`
+	Channels       int               `json:"channels"`
+	Width          int               `json:"width"`
+	Height         int               `json:"height"`
+	BitsPerRaw     string            `json:"bits_per_raw_sample"`
+	PixFmt         string            `json:"pix_fmt"`
+	ColorSpace     string            `json:"color_space"`
+	ColorTransfer  string            `json:"color_transfer"`
+	ColorPrimaries string            `json:"color_primaries"`
+	RFrameRate     string            `json:"r_frame_rate"`
+	Tags           map[string]string `json:"tags"`
+	Disposition    map[string]int    `json:"disposition"`
+	SideDataList   []sideData        `json:"side_data_list"`
 }
 
 type sideData struct {
@@ -225,6 +225,18 @@ func ResolveFFprobe(explicit string) (string, error) {
 		if _, err := os.Stat(adjacent); err == nil {
 			return adjacent, nil
 		}
+	}
+
+	// 5. Previously downloaded in cache dir
+	if cached, err := FFprobeCachePath(); err == nil {
+		if _, err := os.Stat(cached); err == nil {
+			return cached, nil
+		}
+	}
+
+	// 6. Auto-download static binary
+	if p, err := DownloadFFprobe(); err == nil {
+		return p, nil
 	}
 
 	return "", fmt.Errorf("ffprobe not found. Install ffmpeg or provide --ffprobe path")
