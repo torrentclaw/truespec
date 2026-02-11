@@ -1,3 +1,5 @@
+rc: ./.lefthookrc
+
 commit-msg:
   commands:
     validate:

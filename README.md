@@ -10,7 +10,7 @@ Torrent metadata often lies. A release might claim to be "4K HDR Dual Audio" but
 
 TrueSpec is developed by [TorrentClaw](https://torrentclaw.com) and used internally to improve the quality of torrent metadata across its platform. We release it as open source so that other platforms, tools, and communities can benefit from it too — and together we can improve the accuracy of torrent search engines and the health of the torrent network.
 
-Given a list of torrent info hashes, TrueSpec:
+Given torrent info hashes, magnet links, or `.torrent` files, TrueSpec:
 
 1. **Partially downloads** only the bytes needed (headers/atoms, not the full file)
 2. **Runs ffprobe** on the downloaded fragment to extract real metadata
@@ -32,6 +32,8 @@ Given a list of torrent info hashes, TrueSpec:
 
 ## Features
 
+- **Interactive mode** — guided wizard when run without arguments
+- **Flexible input** — accepts info hashes, magnet links, `.torrent` files, or folders of `.torrent` files
 - **Partial download** — only fetches the minimum bytes needed, not the full file (typically < 20 MB)
 - **Parallel scanning** with configurable concurrency
 - **Smart piece selection** — handles MP4 moov atoms at end of file
@@ -58,10 +60,22 @@ go install github.com/torrentclaw/truespec/cmd/truespec@latest
 ## Usage
 
 ```bash
-# Scan one or more info hashes
-truespec scan <info_hash> [info_hash...]
+# Interactive mode (guided wizard)
+truespec
 
-# Scan from a file (one hash per line)
+# Scan by info hash
+truespec scan abc123def456...
+
+# Scan by magnet link
+truespec scan "magnet:?xt=urn:btih:abc123..."
+
+# Scan a .torrent file
+truespec scan movie.torrent
+
+# Scan all .torrent files in a folder
+truespec scan ./torrents/
+
+# Scan from a file (one hash or magnet per line)
 truespec scan -f hashes.txt
 
 # Scan from stdin
@@ -86,8 +100,8 @@ truespec scan \
 | `--temp-dir` | | `/tmp/truespec` | Temp directory for downloads |
 | `--verbose` | `-v` | `false` | Print progress to stderr |
 | `--output` | `-o` | `results_<timestamp>.json` | Output file path |
-| `-f` | | | Read hashes from file |
-| `--stdin` | | `false` | Read hashes from stdin |
+| `-f` | | | Read hashes/magnets from file |
+| `--stdin` | | `false` | Read hashes/magnets from stdin |
 
 ### Environment Variables
 
@@ -159,6 +173,7 @@ Results are saved as JSON:
 ├── internal/
 │   ├── config.go            # Configuration & defaults
 │   ├── downloader.go        # BitTorrent partial download engine
+│   ├── input.go             # Input normalization (hash, magnet, .torrent)
 │   ├── lang.go              # Language code normalization
 │   ├── media.go             # ffprobe integration & metadata extraction
 │   ├── scanner.go           # Scan orchestration & retry logic

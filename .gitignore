@@ -32,6 +32,7 @@ results_*.json
 
 # Lefthook
 lefthook-local.yml
+.lefthookrc.local
 
 # Environment
 .env
