@@ -1,0 +1,35 @@
+# Binaries
+/truespec
+/truespec.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build
+dist/
+vendor/
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp
+/tmp/
+*.tmp
+
+# Output
+results_*.json
+
+# Environment
+.env
+.env.local
