@@ -76,6 +76,77 @@ func NewDownloader(cfg DownloadConfig) (*Downloader, error) {
 	return &Downloader{client: client, cfg: cfg}, nil
 }
 
+// GetTorrentStats returns the download and upload bytes for a specific torrent.
+// Returns (0, 0) if the torrent is not found.
+func (d *Downloader) GetTorrentStats(infoHash string) (downloaded, uploaded int64) {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return 0, 0
+	}
+	stats := t.Stats()
+	return stats.ConnStats.BytesReadData.Int64(), stats.ConnStats.BytesWrittenData.Int64()
+}
+
+// GetClientStats returns the total download and upload bytes for the entire client.
+func (d *Downloader) GetClientStats() (downloaded, uploaded int64) {
+	stats := d.client.Stats()
+	return stats.BytesRead.Int64(), stats.BytesWritten.Int64()
+}
+
+// GetFileList extracts the complete file listing from a torrent's metadata.
+// Must be called after metadata has been resolved (after PartialDownload).
+func (d *Downloader) GetFileList(infoHash string) []FileInfo {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return nil
+	}
+
+	files := t.Files()
+	result := make([]FileInfo, 0, len(files))
+
+	for _, f := range files {
+		path := f.DisplayPath()
+		ext := strings.ToLower(filepath.Ext(path))
+		result = append(result, FileInfo{
+			Path: path,
+			Size: f.Length(),
+			Ext:  ext,
+		})
+	}
+
+	return result
+}
+
+// GetSwarmInfo captures a snapshot of the torrent's swarm health.
+// Must be called while the torrent is still active (before Cleanup).
+func (d *Downloader) GetSwarmInfo(infoHash string) *SwarmInfo {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return nil
+	}
+
+	stats := t.Stats()
+
+	// Count seeders: peers that have 100% of pieces
+	seeds := 0
+	for _, pc := range t.PeerConns() {
+		if int(pc.PeerPieces().GetCardinality()) >= t.NumPieces() {
+			seeds++
+		}
+	}
+
+	return &SwarmInfo{
+		ActivePeers: stats.ActivePeers,
+		TotalPeers:  stats.TotalPeers,
+		Seeds:       seeds,
+		DownloadBps: stats.ConnStats.BytesReadData.Int64(), // cumulative, caller can compute rate
+		UploadBps:   stats.ConnStats.BytesWrittenData.Int64(),
+	}
+}
+
 // PartialDownload downloads the first (and last for MP4) bytes of the largest video file.
 // Returns the download result with file path and metadata.
 // The minBytes parameter controls how many bytes from the start to download.

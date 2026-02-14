@@ -22,6 +22,12 @@ type ScanResult struct {
 	Languages []string        `json:"languages"`
 	ElapsedMs int64           `json:"elapsed_ms"`
 	Error     string          `json:"error"`
+
+	// File listing & threat analysis
+	Files *TorrentFiles `json:"files,omitempty"`
+
+	// Swarm health at time of scan
+	Swarm *SwarmInfo `json:"swarm,omitempty"`
 }
 
 // AudioTrack represents a single audio stream extracted by ffprobe.
@@ -51,4 +57,34 @@ type VideoInfo struct {
 	HDR       string  `json:"hdr"`       // HDR10, HLG, DV, DV+HDR10, "" if SDR
 	FrameRate float64 `json:"frameRate"` // e.g. 23.976
 	Profile   string  `json:"profile"`   // e.g. "Main 10", "High"
+}
+
+// TorrentFiles contains the complete file listing of a torrent with threat analysis.
+type TorrentFiles struct {
+	Total       int        `json:"total"`
+	TotalSize   int64      `json:"total_size"`
+	VideoFiles  []FileInfo `json:"video_files"`
+	AudioFiles  []FileInfo `json:"audio_files"`
+	SubFiles    []FileInfo `json:"sub_files"`
+	ImageFiles  []FileInfo `json:"image_files"`
+	OtherFiles  []FileInfo `json:"other_files"`
+	Suspicious  []FileInfo `json:"suspicious"`
+	ThreatLevel string     `json:"threat_level"` // clean, warning, dangerous
+}
+
+// FileInfo represents a single file within a torrent.
+type FileInfo struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	Ext    string `json:"ext"`
+	Reason string `json:"reason,omitempty"` // why it's suspicious
+}
+
+// SwarmInfo contains live peer/seeder data from the BitTorrent swarm.
+type SwarmInfo struct {
+	ActivePeers int   `json:"active_peers"`
+	TotalPeers  int   `json:"total_peers"`
+	Seeds       int   `json:"seeds"`
+	DownloadBps int64 `json:"download_bps"` // bytes per second at snapshot
+	UploadBps   int64 `json:"upload_bps"`
 }

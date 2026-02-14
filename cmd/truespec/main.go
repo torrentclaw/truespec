@@ -36,6 +36,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		runScan(os.Args[2:])
+	case "stats":
+		runStatsCmd(os.Args[2:])
 	case "version":
 		fmt.Printf("truespec %s\n", version)
 	case "--help", "-h", "help":
@@ -55,6 +57,7 @@ Usage:
   truespec scan [flags] <input> [input...]
   truespec scan [flags] -f <file>
   truespec scan [flags] --stdin
+  truespec stats [--json] [--reset]
   truespec version
 
 Inputs can be info hashes, magnet links, .torrent files, or directories
@@ -64,6 +67,9 @@ The scan command partially downloads torrent files and extracts verified
 media metadata (audio tracks, subtitles, video codec/resolution/HDR) using
 ffprobe. Results are saved to a JSON file (default: results_<timestamp>.json).
 
+The stats command displays accumulated scan statistics (traffic, quality
+distribution, performance). Stats are saved to ~/.truespec/stats.json.
+
 Examples:
   truespec scan abc123def456...
   truespec scan "magnet:?xt=urn:btih:abc123..."
@@ -71,9 +77,57 @@ Examples:
   truespec scan ./torrents/
   truespec scan -f hashes.txt -o my-results.json
   cat hashes.txt | truespec scan --stdin --verbose
+  truespec stats
+  truespec stats --json
+  truespec stats --reset
 
 Run 'truespec scan --help' for scan-specific flags.
 `, version)
+}
+
+func runStatsCmd(args []string) {
+	cfg := internal.DefaultConfig()
+
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	var jsonOutput bool
+	var reset bool
+	var statsFile string
+
+	fs.BoolVar(&jsonOutput, "json", false, "Output raw JSON")
+	fs.BoolVar(&reset, "reset", false, "Reset all stats")
+	fs.StringVar(&statsFile, "file", cfg.StatsFile, "Path to stats file")
+
+	fs.Parse(args)
+
+	if reset {
+		s := internal.NewStats()
+		if err := s.Save(statsFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resetting stats: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "Stats reset successfully.")
+		return
+	}
+
+	s, err := internal.LoadStats(statsFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading stats: %v\n", err)
+		os.Exit(1)
+	}
+
+	s.Compute()
+
+	if jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(s); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding stats: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Print(internal.FormatStats(s))
 }
 
 func runInteractive() {
@@ -270,11 +324,14 @@ func runScan(args []string) {
 	fs.BoolVar(&cfg.Verbose, "v", false, "Print progress logs to stderr (shorthand)")
 	fs.StringVar(&cfg.OutputFile, "output", "", "Output JSON file path (default: results_<timestamp>.json)")
 	fs.StringVar(&cfg.OutputFile, "o", "", "Output JSON file path (default: results_<timestamp>.json)")
+	fs.StringVar(&cfg.StatsFile, "stats-file", cfg.StatsFile, "Path to stats file")
 
 	var fromFile string
 	var fromStdin bool
+	var noStats bool
 	fs.StringVar(&fromFile, "f", "", "Read info hashes/magnets from file (one per line)")
 	fs.BoolVar(&fromStdin, "stdin", false, "Read info hashes/magnets from stdin")
+	fs.BoolVar(&noStats, "no-stats", false, "Disable stats tracking for this scan")
 
 	fs.Parse(args)
 
@@ -332,6 +389,10 @@ func runScan(args []string) {
 		os.Exit(1)
 	}
 
+	if noStats {
+		cfg.StatsFile = ""
+	}
+
 	executeScan(cfg, hashes)
 }
 
@@ -375,15 +436,27 @@ func executeScan(cfg internal.Config, hashes []string) {
 	// Partial downloads are never resumable, so there's zero value in keeping them.
 	cleanTempDir(cfg.TempDir)
 
+	// Load stats
+	var stats *internal.Stats
+	if cfg.StatsFile != "" {
+		stats, err = internal.LoadStats(cfg.StatsFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not load stats: %v\n", err)
+			stats = internal.NewStats()
+		}
+		stats.Version = version
+		stats.RecordSession()
+	}
+
 	// Context with signal handling for graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Run scan and collect results
+	// Run scan and collect results (with stats tracking)
 	start := time.Now()
-	results := internal.Scan(ctx, cfg, hashes)
+	results := internal.ScanWithStats(ctx, cfg, hashes, stats)
 
-	stats := map[string]int{}
+	scanStats := map[string]int{}
 	var collected []internal.ScanResult
 
 	for result := range results {
@@ -399,7 +472,7 @@ func executeScan(cfg internal.Config, hashes []string) {
 		}
 
 		collected = append(collected, result)
-		stats[result.Status]++
+		scanStats[result.Status]++
 
 		if cfg.Verbose {
 			log.Printf("  [%d/%d] %s → %s (%dms)",
@@ -415,7 +488,7 @@ func executeScan(cfg internal.Config, hashes []string) {
 		ScannedAt: time.Now().UTC().Format(time.RFC3339),
 		ElapsedMs: elapsed.Milliseconds(),
 		Total:     len(collected),
-		Stats:     stats,
+		Stats:     scanStats,
 		Results:   collected,
 	}
 
@@ -437,13 +510,25 @@ func executeScan(cfg internal.Config, hashes []string) {
 	// Post-scan cleanup: remove all temp files (partial downloads are never resumable)
 	cleanTempDir(cfg.TempDir)
 
+	// Save stats
+	if stats != nil && cfg.StatsFile != "" {
+		stats.PruneOldBuckets()
+		stats.Compute()
+		if err := stats.Save(cfg.StatsFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not save stats: %v\n", err)
+		}
+	}
+
 	// Print summary to stderr (always visible)
 	fmt.Fprintf(os.Stderr, "\nScan complete in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Total: %d\n", len(collected))
-	for status, count := range stats {
+	for status, count := range scanStats {
 		fmt.Fprintf(os.Stderr, "  %s: %d\n", status, count)
 	}
 	fmt.Fprintf(os.Stderr, "  Results saved to: %s\n", cfg.OutputFile)
+	if cfg.StatsFile != "" {
+		fmt.Fprintf(os.Stderr, "  Stats saved to: %s\n", cfg.StatsFile)
+	}
 }
 
 // readAndNormalizeFile reads lines from a file and normalizes each one

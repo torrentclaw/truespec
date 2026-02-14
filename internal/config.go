@@ -2,6 +2,7 @@ package internal
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -22,6 +23,9 @@ type Config struct {
 
 	// Retry
 	MaxFFprobeRetries int
+
+	// Stats
+	StatsFile string // path to persistent stats JSON file
 }
 
 // DefaultConfig returns a Config with sensible defaults, overridden by env vars.
@@ -35,7 +39,16 @@ func DefaultConfig() Config {
 		MinBytesMKV:       envInt("TRUESPEC_MIN_BYTES_MKV", 10*1024*1024), // 10MB
 		MinBytesMP4:       envInt("TRUESPEC_MIN_BYTES_MP4", 20*1024*1024), // 20MB
 		MaxFFprobeRetries: 3,
+		StatsFile:         envString("TRUESPEC_STATS_FILE", defaultStatsPath()),
 	}
+}
+
+func defaultStatsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/tmp/truespec-stats.json"
+	}
+	return filepath.Join(home, ".truespec", "stats.json")
 }
 
 func envInt(key string, fallback int) int {

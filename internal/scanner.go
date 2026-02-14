@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// Scan processes a list of info hashes concurrently, returning results via channel.
-// Results are emitted as each torrent completes (not in input order).
-func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
+// ScanWithStats is like Scan but also records stats for each result.
+// The stats object is updated concurrently (caller must not access it until channel is closed).
+func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stats) <-chan ScanResult {
 	results := make(chan ScanResult, cfg.Concurrency)
 
 	go func() {
@@ -26,11 +26,15 @@ func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
 		})
 		if err != nil {
 			for _, h := range hashes {
-				results <- ScanResult{
+				result := ScanResult{
 					InfoHash: h,
 					Status:   "error",
 					Error:    "failed to create downloader: " + err.Error(),
 				}
+				if stats != nil {
+					stats.RecordResult(result, 0)
+				}
+				results <- result
 			}
 			return
 		}
@@ -38,16 +42,23 @@ func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
 
 		sem := make(chan struct{}, cfg.Concurrency)
 		var wg sync.WaitGroup
+		var mu sync.Mutex // protects stats
 
 		for i, hash := range hashes {
 			select {
 			case <-ctx.Done():
 				for _, h := range hashes[i:] {
-					results <- ScanResult{
+					result := ScanResult{
 						InfoHash: h,
 						Status:   "error",
 						Error:    "cancelled",
 					}
+					if stats != nil {
+						mu.Lock()
+						stats.RecordResult(result, 0)
+						mu.Unlock()
+					}
+					results <- result
 				}
 				wg.Wait()
 				return
@@ -64,6 +75,17 @@ func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
 				}
 
 				result := processOne(ctx, dl, cfg, h)
+
+				// Capture traffic stats before cleanup
+				var downloaded, uploaded int64
+				if stats != nil {
+					downloaded, uploaded = dl.GetTorrentStats(h)
+					mu.Lock()
+					stats.RecordResult(result, downloaded)
+					stats.RecordTraffic(0, uploaded) // download already counted in RecordResult
+					mu.Unlock()
+				}
+
 				results <- result
 
 				if cfg.Verbose {
@@ -79,7 +101,15 @@ func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
 	return results
 }
 
+// Scan processes a list of info hashes concurrently, returning results via channel.
+// Results are emitted as each torrent completes (not in input order).
+func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
+	return ScanWithStats(ctx, cfg, hashes, nil)
+}
+
 func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string) ScanResult {
+	// Resolve language detection config once (cached after first call)
+	langCfg := ResolveLangDetect()
 	start := time.Now()
 
 	// Start with the smaller MKV threshold — the downloader will automatically
@@ -89,8 +119,29 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 	// Initial download
 	dlResult, err := dl.PartialDownload(ctx, infoHash, minBytes)
 	if err != nil {
-		return errorResult(infoHash, err, start)
+		// Even on download failure, try to capture file listing if metadata was resolved
+		result := errorResult(infoHash, err, start)
+		fileList := dl.GetFileList(infoHash)
+		if len(fileList) > 0 {
+			result.Files = AnalyzeFiles(fileList)
+		}
+		swarm := dl.GetSwarmInfo(infoHash)
+		if swarm != nil {
+			result.Swarm = swarm
+		}
+		dl.Cleanup(infoHash)
+		return result
 	}
+
+	// Capture file listing (available since metadata is resolved)
+	fileList := dl.GetFileList(infoHash)
+	var torrentFiles *TorrentFiles
+	if len(fileList) > 0 {
+		torrentFiles = AnalyzeFiles(fileList)
+	}
+
+	// Capture swarm info before any cleanup
+	swarmInfo := dl.GetSwarmInfo(infoHash)
 
 	// If MP4, the initial download already got start+end pieces.
 	// Adjust minBytes for retry calculations.
@@ -102,12 +153,15 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 	ffprobePath, err := ResolveFFprobe(cfg.FFprobePath)
 	if err != nil {
 		dl.Cleanup(infoHash)
-		return ScanResult{
+		result := ScanResult{
 			InfoHash:  infoHash,
 			Status:    "error",
 			Error:     err.Error(),
 			ElapsedMs: time.Since(start).Milliseconds(),
+			Files:     torrentFiles,
+			Swarm:     swarmInfo,
 		}
+		return result
 	}
 
 	// Try ffprobe, with retries requesting more data
@@ -127,6 +181,12 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			media.Status = "success"
 			media.File = dlResult.FileName
 			media.Languages = ComputeLanguages(nil, media.Audio)
+			media.Files = torrentFiles
+			media.Swarm = swarmInfo
+
+			// Detect language for single "und" audio tracks
+			ApplyLangDetection(ctx, langCfg, media, dlResult.FilePath)
+
 			media.ElapsedMs = time.Since(start).Milliseconds()
 			dl.Cleanup(infoHash)
 			return *media
@@ -142,7 +202,10 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 
 			if err := dl.RequestMorePieces(ctx, infoHash, minBytes); err != nil {
 				dl.Cleanup(infoHash)
-				return errorResult(infoHash, err, start)
+				result := errorResult(infoHash, err, start)
+				result.Files = torrentFiles
+				result.Swarm = swarmInfo
+				return result
 			}
 			continue
 		}
@@ -155,6 +218,8 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 		Status:    "ffprobe_failed",
 		File:      dlResult.FileName,
 		ElapsedMs: time.Since(start).Milliseconds(),
+		Files:     torrentFiles,
+		Swarm:     swarmInfo,
 	}
 }
 
