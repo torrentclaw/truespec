@@ -290,3 +290,32 @@ func TestHumanizeBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestSave_InvalidPath(t *testing.T) {
+	s := NewStats()
+	s.TotalScanned = 1
+
+	// Try to save to a path where the directory can't be created
+	err := s.Save("/proc/nonexistent/impossible/stats.json")
+	if err == nil {
+		t.Error("Save to invalid path should return error")
+	}
+}
+
+func TestHumanizeBytes_EdgeCases(t *testing.T) {
+	tests := []struct {
+		input    int64
+		expected string
+	}{
+		{-1, "-1 B"},
+		{1, "1 B"},
+		{1023, "1023 B"},
+		{5 * 1024 * 1024 * 1024 * 1024, "5.00 TB"},
+	}
+	for _, tt := range tests {
+		result := HumanizeBytes(tt.input)
+		if result != tt.expected {
+			t.Errorf("HumanizeBytes(%d) = %s, want %s", tt.input, result, tt.expected)
+		}
+	}
+}

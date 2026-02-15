@@ -85,6 +85,6 @@ type SwarmInfo struct {
 	ActivePeers int   `json:"active_peers"`
 	TotalPeers  int   `json:"total_peers"`
 	Seeds       int   `json:"seeds"`
-	DownloadBps int64 `json:"download_bps"` // bytes per second at snapshot
-	UploadBps   int64 `json:"upload_bps"`
+	DownloadBytesTotal int64 `json:"download_bytes_total"` // bytes per second at snapshot
+	UploadBytesTotal   int64 `json:"upload_bytes_total"`
 }

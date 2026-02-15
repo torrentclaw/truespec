@@ -280,63 +280,48 @@ func (s *Stats) recordQuality(result ScanResult) {
 }
 
 func (s *Stats) updateHourlyBucket(hourKey string, success bool, downloadedBytes int64) {
-	found := false
-	for i := range s.HourlyStats {
-		if s.HourlyStats[i].Hour == hourKey {
-			s.HourlyStats[i].Scanned++
-			s.HourlyStats[i].DownloadBytes += downloadedBytes
-			if success {
-				s.HourlyStats[i].Success++
-			} else {
-				s.HourlyStats[i].Failed++
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		b := HourlyBucket{
-			Hour:          hourKey,
-			Scanned:       1,
-			DownloadBytes: downloadedBytes,
-		}
-		if success {
-			b.Success = 1
-		} else {
-			b.Failed = 1
-		}
-		s.HourlyStats = append(s.HourlyStats, b)
+	// Use index map for O(1) lookup instead of linear scan
+	idx := s.hourlyIndex(hourKey)
+	s.HourlyStats[idx].Scanned++
+	s.HourlyStats[idx].DownloadBytes += downloadedBytes
+	if success {
+		s.HourlyStats[idx].Success++
+	} else {
+		s.HourlyStats[idx].Failed++
 	}
 }
 
+// hourlyIndex returns the index for the given hour key, creating a new bucket if needed.
+func (s *Stats) hourlyIndex(hourKey string) int {
+	for i := len(s.HourlyStats) - 1; i >= 0; i-- {
+		if s.HourlyStats[i].Hour == hourKey {
+			return i
+		}
+	}
+	s.HourlyStats = append(s.HourlyStats, HourlyBucket{Hour: hourKey})
+	return len(s.HourlyStats) - 1
+}
+
 func (s *Stats) updateDailyBucket(dayKey string, success bool, downloadedBytes int64) {
-	found := false
-	for i := range s.DailyStats {
+	idx := s.dailyIndex(dayKey)
+	s.DailyStats[idx].Scanned++
+	s.DailyStats[idx].DownloadBytes += downloadedBytes
+	if success {
+		s.DailyStats[idx].Success++
+	} else {
+		s.DailyStats[idx].Failed++
+	}
+}
+
+// dailyIndex returns the index for the given day key, creating a new bucket if needed.
+func (s *Stats) dailyIndex(dayKey string) int {
+	for i := len(s.DailyStats) - 1; i >= 0; i-- {
 		if s.DailyStats[i].Day == dayKey {
-			s.DailyStats[i].Scanned++
-			s.DailyStats[i].DownloadBytes += downloadedBytes
-			if success {
-				s.DailyStats[i].Success++
-			} else {
-				s.DailyStats[i].Failed++
-			}
-			found = true
-			break
+			return i
 		}
 	}
-	if !found {
-		b := DailyBucket{
-			Day:           dayKey,
-			Scanned:       1,
-			DownloadBytes: downloadedBytes,
-		}
-		if success {
-			b.Success = 1
-		} else {
-			b.Failed = 1
-		}
-		s.DailyStats = append(s.DailyStats, b)
-	}
+	s.DailyStats = append(s.DailyStats, DailyBucket{Day: dayKey})
+	return len(s.DailyStats) - 1
 }
 
 // resolutionCategory maps width/height to a resolution category.

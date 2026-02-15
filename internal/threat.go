@@ -17,7 +17,6 @@ var dangerousExts = map[string]string{
 	".lnk": "Windows shortcut (can execute commands)",
 	".vbs": "VBScript",
 	".vbe": "Encoded VBScript",
-	".js":  "JavaScript (can be executed by Windows Script Host)",
 	".jse": "Encoded JScript",
 	".wsf": "Windows Script File",
 	".wsh": "Windows Script Host settings",
@@ -47,6 +46,7 @@ var warningExts = map[string]string{
 	".deb":  "Debian package",
 	".rpm":  "RPM package",
 	".appimage": "Linux AppImage",
+	".js":       "JavaScript file (review if unexpected)",
 }
 
 // Known safe extensions for media torrents.

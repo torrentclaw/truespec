@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"runtime"
 	"strconv"
 	"strings"
@@ -40,6 +41,13 @@ type whisperJSON struct {
 // confidenceRe extracts confidence from whisper stderr:
 // "auto-detected language: en (p = 0.409680)"
 var confidenceRe = regexp.MustCompile(`auto-detected language:\s*(\S+)\s*\(p\s*=\s*([\d.]+)\)`)
+
+// Cached language detection config (resolved once per process).
+var (
+	langDetectOnce   sync.Once
+	langDetectCached LangDetectConfig
+)
+
 
 // DetectAudioLanguage extracts a short audio clip from the video file and uses
 // whisper.cpp to detect the spoken language. Returns nil if detection fails
@@ -146,6 +154,14 @@ func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath st
 // It checks: 1) UserConfig paths, 2) env vars, 3) known install locations, 4) PATH.
 // Returns with Enabled=false if whisper is not available (not an error).
 func ResolveLangDetect() LangDetectConfig {
+	langDetectOnce.Do(func() {
+		langDetectCached = resolveLangDetectInner()
+	})
+	return langDetectCached
+}
+
+// resolveLangDetectInner does the actual resolution (called once via sync.Once).
+func resolveLangDetectInner() LangDetectConfig {
 	cfg := LangDetectConfig{}
 
 	// Check user config first — if whisper is explicitly disabled, skip

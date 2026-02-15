@@ -2,6 +2,8 @@ package internal
 
 import (
 	"archive/tar"
+	"crypto/sha256"
+	"encoding/hex"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -22,6 +24,9 @@ const (
 	// Safety limits
 	maxExtractSize = 500 * 1024 * 1024 // 500MB max for extracted binary
 	maxModelSize   = 200 * 1024 * 1024 // 200MB max for model file
+
+	// Known SHA256 hash of ggml-tiny.bin (v1.5.x)
+	whisperModelSHA256 = "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"
 )
 
 // HTTP clients with timeouts (never use http.DefaultClient for downloads)
@@ -290,3 +295,29 @@ func downloadFile(url, destPath string, maxSize int64) error {
 
 	return nil
 }
+
+// verifyModelChecksum checks the SHA256 hash of the downloaded model file.
+// Returns nil if the hash matches or if the known hash is empty (skip verification).
+func verifyModelChecksum(path string) error {
+	if whisperModelSHA256 == "" {
+		return nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open model for checksum: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("read model for checksum: %w", err)
+	}
+
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != whisperModelSHA256 {
+		return fmt.Errorf("model checksum mismatch: got %s, want %s", got, whisperModelSHA256)
+	}
+	return nil
+}
+
