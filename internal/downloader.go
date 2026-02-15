@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/url"
 	"os"
@@ -259,6 +260,25 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 			filePath = c
 			break
 		}
+	}
+
+	// Fallback: walk the torrent directory to find the video file by name.
+	// Handles torrents with wrapper directories (e.g. "www.UIndex.org    -    <name>/...")
+	// where the static candidate paths don't match the actual nested structure.
+	if filePath == "" {
+		targetBase := filepath.Base(videoFile.DisplayPath())
+		torrentDir := filepath.Join(d.cfg.TempDir, t.Name())
+		_ = filepath.WalkDir(torrentDir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			base := filepath.Base(path)
+			if base == targetBase || base == targetBase+".part" {
+				filePath = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
 	}
 
 	if filePath == "" {
