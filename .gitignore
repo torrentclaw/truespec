@@ -37,3 +37,6 @@ lefthook-local.yml
 # Environment
 .env
 .env.local
+
+# Claude Code
+.claude/
