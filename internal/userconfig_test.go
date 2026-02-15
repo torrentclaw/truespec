@@ -131,15 +131,109 @@ func TestShowConfig(t *testing.T) {
 	}
 }
 
-func TestShowConfig_MaskedVTKey(t *testing.T) {
-	cfg := DefaultUserConfig()
-	cfg.VirusTotalAPIKey = "abcdefghijklmnop"
-	output := cfg.ShowConfig()
-
-	if !strings.Contains(output, "abcd") {
-		t.Error("should show first 4 chars")
+// Fix 1: Test that ShowConfig doesn't panic with short VT keys
+func TestShowConfig_VTKeyLengths(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected string
+	}{
+		{"", "not set"},
+		{"a", "****"},
+		{"abc", "****"},
+		{"abcd1234", "****"},                  // exactly 8 → masked
+		{"abcd12345", "abcd...2345"},          // 9 chars → shows first4...last4
+		{"abcdefghijklmnop", "abcd...mnop"},   // 16 chars
 	}
-	if strings.Contains(output, "abcdefghijklmnop") {
-		t.Error("should NOT show full key")
+
+	for _, tt := range tests {
+		cfg := DefaultUserConfig()
+		cfg.VirusTotalAPIKey = tt.key
+		output := cfg.ShowConfig() // must not panic
+		if !strings.Contains(output, tt.expected) {
+			t.Errorf("key=%q: expected output to contain %q, got:\n%s", tt.key, tt.expected, output)
+		}
+	}
+}
+
+func TestMaskAPIKey(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", "not set"},
+		{"a", "****"},
+		{"ab", "****"},
+		{"abcdefgh", "****"},                // 8 chars → fully masked
+		{"abcdefghi", "abcd...fghi"},        // 9 chars
+		{"0123456789abcdef", "0123...cdef"},  // 16 chars
+	}
+
+	for _, tt := range tests {
+		result := maskAPIKey(tt.input)
+		if result != tt.expected {
+			t.Errorf("maskAPIKey(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestSave_CreatesDirectory(t *testing.T) {
+	// Override HOME to use temp dir
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	cfg := DefaultUserConfig()
+	cfg.Configured = true
+	cfg.Concurrency = 42
+
+	err := cfg.Save()
+	if err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Verify file exists
+	path := filepath.Join(dir, ".truespec", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("config file not created: %v", err)
+	}
+
+	var loaded UserConfig
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse saved config: %v", err)
+	}
+
+	if loaded.Concurrency != 42 {
+		t.Errorf("expected concurrency=42, got %d", loaded.Concurrency)
+	}
+}
+
+func TestSave_OverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", dir)
+	defer os.Setenv("HOME", origHome)
+
+	// Save first version
+	cfg1 := DefaultUserConfig()
+	cfg1.Configured = true
+	cfg1.Concurrency = 1
+	if err := cfg1.Save(); err != nil {
+		t.Fatalf("first Save failed: %v", err)
+	}
+
+	// Overwrite with second version (tests Windows rename fix)
+	cfg2 := DefaultUserConfig()
+	cfg2.Configured = true
+	cfg2.Concurrency = 2
+	if err := cfg2.Save(); err != nil {
+		t.Fatalf("second Save failed: %v", err)
+	}
+
+	// Verify second version persisted
+	loaded := LoadUserConfig()
+	if loaded.Concurrency != 2 {
+		t.Errorf("expected concurrency=2 after overwrite, got %d", loaded.Concurrency)
 	}
 }

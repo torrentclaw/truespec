@@ -145,7 +145,7 @@ func (s *Stats) Save(path string) error {
 		return fmt.Errorf("write temp stats: %w", err)
 	}
 
-	if err := os.Rename(tmpFile, path); err != nil {
+	if err := atomicRename(tmpFile, path); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("rename stats file: %w", err)
 	}

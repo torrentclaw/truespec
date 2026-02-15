@@ -11,12 +11,23 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
 	whisperReleasesAPI = "https://api.github.com/repos/ggerganov/whisper.cpp/releases/latest"
 	whisperModelURL    = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
 	whisperModelName   = "ggml-tiny.bin"
+
+	// Safety limits
+	maxExtractSize = 500 * 1024 * 1024 // 500MB max for extracted binary
+	maxModelSize   = 200 * 1024 * 1024 // 200MB max for model file
+)
+
+// HTTP clients with timeouts (never use http.DefaultClient for downloads)
+var (
+	apiClient = &http.Client{Timeout: 30 * time.Second}
+	dlClient  = &http.Client{Timeout: 10 * time.Minute}
 )
 
 type ghRelease struct {
@@ -27,6 +38,14 @@ type ghRelease struct {
 type ghAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+// whisperBinaryName returns the correct binary name for the current OS.
+func whisperBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "whisper-cli.exe"
+	}
+	return "whisper-cli"
 }
 
 // whisperAssetPattern returns the expected asset name pattern for the current platform.
@@ -46,6 +65,13 @@ func whisperAssetPattern() (string, error) {
 		case "arm64":
 			return "darwin-arm64", nil
 		}
+	case "windows":
+		switch runtime.GOARCH {
+		case "amd64":
+			return "win-x86_64", nil
+		case "arm64":
+			return "win-arm64", nil
+		}
 	}
 	return "", fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 }
@@ -56,7 +82,7 @@ func DownloadWhisper() (string, string, error) {
 	binDir := WhisperBinDir()
 	modelDir := WhisperModelDir()
 
-	whisperBin := filepath.Join(binDir, "whisper-cli")
+	whisperBin := filepath.Join(binDir, whisperBinaryName())
 	modelPath := filepath.Join(modelDir, whisperModelName)
 
 	// Download binary if not exists
@@ -73,7 +99,7 @@ func DownloadWhisper() (string, string, error) {
 	// Download model if not exists
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Downloading whisper model (tiny, ~75MB)...\n")
-		if err := downloadFile(whisperModelURL, modelPath); err != nil {
+		if err := downloadFile(whisperModelURL, modelPath, maxModelSize); err != nil {
 			return "", "", fmt.Errorf("download whisper model: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "Model installed to %s\n", modelPath)
@@ -90,8 +116,8 @@ func downloadWhisperBinary(destPath string) error {
 		return err
 	}
 
-	// Get latest release
-	resp, err := http.Get(whisperReleasesAPI)
+	// Get latest release (with timeout)
+	resp, err := apiClient.Get(whisperReleasesAPI)
 	if err != nil {
 		return fmt.Errorf("fetch releases: %w", err)
 	}
@@ -106,39 +132,16 @@ func downloadWhisperBinary(destPath string) error {
 		return fmt.Errorf("parse release: %w", err)
 	}
 
-	// Find matching asset (look for tar.gz with platform pattern, prefer non-cuda)
-	var assetURL string
-	for _, a := range release.Assets {
-		name := strings.ToLower(a.Name)
-		if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
-			// Skip CUDA builds — we want CPU-only
-			if strings.Contains(name, "cuda") || strings.Contains(name, "cublas") {
-				continue
-			}
-			assetURL = a.BrowserDownloadURL
-			break
-		}
-	}
-
-	if assetURL == "" {
-		// Fallback: try any matching asset
-		for _, a := range release.Assets {
-			name := strings.ToLower(a.Name)
-			if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
-				assetURL = a.BrowserDownloadURL
-				break
-			}
-		}
-	}
-
+	// Find matching asset
+	assetURL := findWhisperAsset(release.Assets, pattern)
 	if assetURL == "" {
 		return fmt.Errorf("no whisper-cli release found for %s (release %s)", pattern, release.TagName)
 	}
 
 	fmt.Fprintf(os.Stderr, "Downloading from %s...\n", release.TagName)
 
-	// Download tar.gz
-	dlResp, err := http.Get(assetURL)
+	// Download tar.gz (with timeout)
+	dlResp, err := dlClient.Get(assetURL)
 	if err != nil {
 		return fmt.Errorf("download asset: %w", err)
 	}
@@ -148,12 +151,42 @@ func downloadWhisperBinary(destPath string) error {
 		return fmt.Errorf("download returned %d", dlResp.StatusCode)
 	}
 
-	// Extract whisper-cli from tar.gz
+	// Windows releases may be .zip, Unix are .tar.gz
+	if strings.HasSuffix(strings.ToLower(assetURL), ".zip") {
+		// For now, only tar.gz is supported
+		return fmt.Errorf("zip archives not yet supported; please install whisper-cli manually")
+	}
+
 	if err := extractWhisperFromTarGz(dlResp.Body, destPath); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// findWhisperAsset searches release assets for a matching platform binary.
+// Prefers non-CUDA builds for CPU-only operation.
+func findWhisperAsset(assets []ghAsset, pattern string) string {
+	// First pass: non-CUDA tar.gz
+	for _, a := range assets {
+		name := strings.ToLower(a.Name)
+		if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
+			if strings.Contains(name, "cuda") || strings.Contains(name, "cublas") {
+				continue
+			}
+			return a.BrowserDownloadURL
+		}
+	}
+
+	// Second pass: any matching tar.gz (including CUDA)
+	for _, a := range assets {
+		name := strings.ToLower(a.Name)
+		if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
+			return a.BrowserDownloadURL
+		}
+	}
+
+	return ""
 }
 
 func extractWhisperFromTarGz(r io.Reader, destPath string) error {
@@ -165,6 +198,14 @@ func extractWhisperFromTarGz(r io.Reader, destPath string) error {
 
 	tr := tar.NewReader(gz)
 
+	// Target binary names to search for in the archive
+	targetNames := map[string]bool{
+		"whisper-cli":     true,
+		"whisper-cli.exe": true,
+		"main":            true,
+		"main.exe":        true,
+	}
+
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -174,37 +215,45 @@ func extractWhisperFromTarGz(r io.Reader, destPath string) error {
 			return fmt.Errorf("read tar: %w", err)
 		}
 
-		base := filepath.Base(header.Name)
-		// Look for whisper-cli or main binary
-		if base == "whisper-cli" || base == "main" {
-			if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-				return fmt.Errorf("create bin dir: %w", err)
-			}
-
-			out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-			if err != nil {
-				return fmt.Errorf("create binary: %w", err)
-			}
-
-			if _, err := io.Copy(out, tr); err != nil {
-				out.Close()
-				os.Remove(destPath)
-				return fmt.Errorf("extract binary: %w", err)
-			}
-			out.Close()
-			return nil
+		// Safety: reject entries larger than maxExtractSize
+		if header.Size > maxExtractSize {
+			return fmt.Errorf("archive entry %q too large (%d bytes, max %d)", header.Name, header.Size, maxExtractSize)
 		}
+
+		base := filepath.Base(header.Name)
+		if !targetNames[base] {
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			return fmt.Errorf("create bin dir: %w", err)
+		}
+
+		out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return fmt.Errorf("create binary: %w", err)
+		}
+
+		// Use LimitReader to enforce size limit even if header.Size is spoofed
+		limited := io.LimitReader(tr, maxExtractSize)
+		if _, err := io.Copy(out, limited); err != nil {
+			out.Close()
+			os.Remove(destPath)
+			return fmt.Errorf("extract binary: %w", err)
+		}
+		out.Close()
+		return nil
 	}
 
 	return fmt.Errorf("whisper-cli binary not found in archive")
 }
 
-func downloadFile(url, destPath string) error {
+func downloadFile(url, destPath string, maxSize int64) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return fmt.Errorf("create dir: %w", err)
 	}
 
-	resp, err := http.Get(url)
+	resp, err := dlClient.Get(url)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
@@ -220,7 +269,9 @@ func downloadFile(url, destPath string) error {
 		return fmt.Errorf("create file: %w", err)
 	}
 
-	written, err := io.Copy(out, resp.Body)
+	// Enforce max download size
+	limited := io.LimitReader(resp.Body, maxSize)
+	written, err := io.Copy(out, limited)
 	out.Close()
 	if err != nil {
 		os.Remove(tmpPath)
@@ -232,7 +283,7 @@ func downloadFile(url, destPath string) error {
 		return fmt.Errorf("downloaded file too small (%d bytes)", written)
 	}
 
-	if err := os.Rename(tmpPath, destPath); err != nil {
+	if err := atomicRename(tmpPath, destPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}

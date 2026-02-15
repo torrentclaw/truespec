@@ -53,7 +53,7 @@ func DefaultUserConfig() UserConfig {
 func UserConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/truespec-config.json"
+		return filepath.Join(os.TempDir(), "truespec-config.json")
 	}
 	return filepath.Join(home, ".truespec", "config.json")
 }
@@ -62,7 +62,7 @@ func UserConfigPath() string {
 func TrueSpecDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/.truespec"
+		return filepath.Join(os.TempDir(), ".truespec")
 	}
 	return filepath.Join(home, ".truespec")
 }
@@ -93,6 +93,7 @@ func LoadUserConfig() UserConfig {
 }
 
 // Save writes the user config to disk atomically.
+// On Windows, removes the destination first since os.Rename cannot overwrite.
 func (c *UserConfig) Save() error {
 	path := UserConfigPath()
 	dir := filepath.Dir(path)
@@ -110,7 +111,7 @@ func (c *UserConfig) Save() error {
 		return fmt.Errorf("write temp config: %w", err)
 	}
 
-	if err := os.Rename(tmpFile, path); err != nil {
+	if err := atomicRename(tmpFile, path); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("rename config file: %w", err)
 	}
@@ -140,7 +141,7 @@ func (c *UserConfig) ApplyToConfig(cfg *Config) {
 	}
 }
 
-// ShowConfig prints the current config to stderr in a human-readable format.
+// ShowConfig returns a human-readable summary of the current configuration.
 func (c *UserConfig) ShowConfig() string {
 	yn := func(b bool) string {
 		if b {
@@ -159,11 +160,7 @@ func (c *UserConfig) ShowConfig() string {
 		s += fmt.Sprintf("    Binary:             %s\n", valueOrNA(c.WhisperPath))
 		s += fmt.Sprintf("    Model:              %s\n", valueOrNA(c.WhisperModel))
 	}
-	if c.VirusTotalAPIKey != "" {
-		s += fmt.Sprintf("  VirusTotal API key:   %s...%s\n", c.VirusTotalAPIKey[:4], c.VirusTotalAPIKey[len(c.VirusTotalAPIKey)-4:])
-	} else {
-		s += "  VirusTotal API key:   not set\n"
-	}
+	s += fmt.Sprintf("  VirusTotal API key:   %s\n", maskAPIKey(c.VirusTotalAPIKey))
 	s += fmt.Sprintf("\n  Concurrency:          %d\n", c.Concurrency)
 	s += fmt.Sprintf("  Stall timeout:        %ds\n", c.StallTimeout)
 	s += fmt.Sprintf("  Max timeout:          %ds\n", c.MaxTimeout)
@@ -173,9 +170,23 @@ func (c *UserConfig) ShowConfig() string {
 	return s
 }
 
+// maskAPIKey safely masks an API key for display.
+// Shows first 4 and last 4 characters if long enough, otherwise masks entirely.
+func maskAPIKey(key string) string {
+	if key == "" {
+		return "not set"
+	}
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
+
 func valueOrNA(s string) string {
 	if s == "" {
 		return "n/a"
 	}
 	return s
 }
+
+// atomicRename is defined in fileutil.go (shared between stats.go and userconfig.go)
