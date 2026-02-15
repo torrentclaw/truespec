@@ -21,10 +21,10 @@ func TestVTClient_LookupHash_Found(t *testing.T) {
 
 		resp := vtAPIResponse{}
 		resp.Data.Attributes.LastAnalysisStats = vtAnalysisStats{
-			Malicious:   5,
-			Suspicious:  1,
-			Harmless:    20,
-			Undetected:  46,
+			Malicious:  5,
+			Suspicious: 1,
+			Harmless:   20,
+			Undetected: 46,
 		}
 		resp.Data.Attributes.LastAnalysisResults = map[string]vtAnalysisResult{
 			"EngineA": {Category: "malicious", EngineName: "EngineA", Result: "Trojan.Gen"},
@@ -42,7 +42,7 @@ func TestVTClient_LookupHash_Found(t *testing.T) {
 	// Override base URL via custom HTTP client that rewrites requests
 	client.httpClient = server.Client()
 	// We need to override the URL, so let's test parseFileReport directly instead
-	
+
 	// Test parseFileReport
 	apiResp := vtAPIResponse{}
 	apiResp.Data.Attributes.LastAnalysisStats = vtAnalysisStats{

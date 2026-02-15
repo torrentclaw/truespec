@@ -2,9 +2,9 @@ package internal
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -320,4 +320,3 @@ func verifyModelChecksum(path string) error {
 	}
 	return nil
 }
-

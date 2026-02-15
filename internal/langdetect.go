@@ -9,10 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sync"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,7 +48,6 @@ var (
 	langDetectCached LangDetectConfig
 )
 
-
 // DetectAudioLanguage extracts a short audio clip from the video file and uses
 // whisper.cpp to detect the spoken language. Returns nil if detection fails
 // or is not applicable.
@@ -70,12 +69,12 @@ func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath st
 
 	ffmpegCmd := exec.CommandContext(ffmpegCtx, cfg.FFmpegPath,
 		"-i", videoPath,
-		"-t", "30",        // 30 seconds
-		"-vn",              // no video
-		"-ar", "16000",     // 16kHz sample rate
-		"-ac", "1",         // mono
-		"-f", "wav",        // wav format
-		"-y",               // overwrite
+		"-t", "30", // 30 seconds
+		"-vn",          // no video
+		"-ar", "16000", // 16kHz sample rate
+		"-ac", "1", // mono
+		"-f", "wav", // wav format
+		"-y", // overwrite
 		wavPath,
 	)
 	ffmpegCmd.Stderr = nil // suppress ffmpeg output

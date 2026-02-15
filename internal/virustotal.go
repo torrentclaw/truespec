@@ -33,14 +33,14 @@ type VTClient struct {
 
 // VTFileReport is the parsed response from a VT file lookup or analysis.
 type VTFileReport struct {
-	Detected       bool              `json:"detected"`         // any engine detected it
-	Detections     int               `json:"detections"`       // number of engines that flagged it
-	TotalEngines   int               `json:"total_engines"`    // total engines that scanned
-	MalwareNames   []string          `json:"malware_names"`    // names from engines that detected
-	Permalink      string            `json:"permalink"`        // link to VT web report
-	ScanDate       string            `json:"scan_date"`        // when the scan was performed
-	Status         string            `json:"status"`           // vt_clean, vt_malware, vt_unknown, vt_error
-	UploadedByUs   bool              `json:"uploaded_by_us"`   // true if we uploaded the file
+	Detected     bool     `json:"detected"`       // any engine detected it
+	Detections   int      `json:"detections"`     // number of engines that flagged it
+	TotalEngines int      `json:"total_engines"`  // total engines that scanned
+	MalwareNames []string `json:"malware_names"`  // names from engines that detected
+	Permalink    string   `json:"permalink"`      // link to VT web report
+	ScanDate     string   `json:"scan_date"`      // when the scan was performed
+	Status       string   `json:"status"`         // vt_clean, vt_malware, vt_unknown, vt_error
+	UploadedByUs bool     `json:"uploaded_by_us"` // true if we uploaded the file
 }
 
 // vtAPIResponse matches the VT v3 API response structure.
@@ -49,9 +49,9 @@ type vtAPIResponse struct {
 		ID         string `json:"id"`
 		Type       string `json:"type"`
 		Attributes struct {
-			LastAnalysisDate    int64                        `json:"last_analysis_date"`
-			LastAnalysisStats   vtAnalysisStats              `json:"last_analysis_stats"`
-			LastAnalysisResults map[string]vtAnalysisResult  `json:"last_analysis_results"`
+			LastAnalysisDate    int64                       `json:"last_analysis_date"`
+			LastAnalysisStats   vtAnalysisStats             `json:"last_analysis_stats"`
+			LastAnalysisResults map[string]vtAnalysisResult `json:"last_analysis_results"`
 		} `json:"attributes"`
 	} `json:"data"`
 	Error struct {
@@ -268,8 +268,8 @@ func (c *VTClient) PollAnalysis(ctx context.Context, analysisID string) (*VTFile
 			var result struct {
 				Data struct {
 					Attributes struct {
-						Status string          `json:"status"`
-						Stats  vtAnalysisStats `json:"stats"`
+						Status  string                      `json:"status"`
+						Stats   vtAnalysisStats             `json:"stats"`
 						Results map[string]vtAnalysisResult `json:"results"`
 					} `json:"attributes"`
 				} `json:"data"`

@@ -140,9 +140,9 @@ func TestHasSuspiciousPattern(t *testing.T) {
 		{"movie.mkv", false},
 		{"movie.srt", false},
 		{"movie.nfo", false},
-		{"movie.avi.xyz", true},       // media ext + unknown ext
-		{"movie.mp4.abc", true},       // media ext + unknown ext
-		{"movie.mkv.srt", false},      // media ext + safe ext
+		{"movie.avi.xyz", true},  // media ext + unknown ext
+		{"movie.mp4.abc", true},  // media ext + unknown ext
+		{"movie.mkv.srt", false}, // media ext + safe ext
 		{"normal_file.txt", false},
 	}
 
@@ -157,8 +157,8 @@ func TestHasSuspiciousPattern(t *testing.T) {
 func TestAnalyzeFiles_DangerousOverridesWarning(t *testing.T) {
 	files := []FileInfo{
 		{Path: "Movie/Movie.mkv", Size: 1_000_000_000, Ext: ".mkv"},
-		{Path: "Movie/extras.zip", Size: 10_000_000, Ext: ".zip"},      // warning
-		{Path: "Movie/keygen.exe", Size: 500_000, Ext: ".exe"},          // dangerous
+		{Path: "Movie/extras.zip", Size: 10_000_000, Ext: ".zip"}, // warning
+		{Path: "Movie/keygen.exe", Size: 500_000, Ext: ".exe"},    // dangerous
 	}
 
 	result := AnalyzeFiles(files)

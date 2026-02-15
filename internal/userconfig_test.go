@@ -140,9 +140,9 @@ func TestShowConfig_VTKeyLengths(t *testing.T) {
 		{"", "not set"},
 		{"a", "****"},
 		{"abc", "****"},
-		{"abcd1234", "****"},                  // exactly 8 → masked
-		{"abcd12345", "abcd...2345"},          // 9 chars → shows first4...last4
-		{"abcdefghijklmnop", "abcd...mnop"},   // 16 chars
+		{"abcd1234", "****"},                // exactly 8 → masked
+		{"abcd12345", "abcd...2345"},        // 9 chars → shows first4...last4
+		{"abcdefghijklmnop", "abcd...mnop"}, // 16 chars
 	}
 
 	for _, tt := range tests {
@@ -165,7 +165,7 @@ func TestMaskAPIKey(t *testing.T) {
 		{"ab", "****"},
 		{"abcdefgh", "****"},                // 8 chars → fully masked
 		{"abcdefghi", "abcd...fghi"},        // 9 chars
-		{"0123456789abcdef", "0123...cdef"},  // 16 chars
+		{"0123456789abcdef", "0123...cdef"}, // 16 chars
 	}
 
 	for _, tt := range tests {

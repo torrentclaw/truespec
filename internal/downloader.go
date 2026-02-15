@@ -139,9 +139,9 @@ func (d *Downloader) GetSwarmInfo(infoHash string) *SwarmInfo {
 	}
 
 	return &SwarmInfo{
-		ActivePeers: stats.ActivePeers,
-		TotalPeers:  stats.TotalPeers,
-		Seeds:       seeds,
+		ActivePeers:        stats.ActivePeers,
+		TotalPeers:         stats.TotalPeers,
+		Seeds:              seeds,
 		DownloadBytesTotal: stats.ConnStats.BytesReadData.Int64(), // cumulative, caller can compute rate
 		UploadBytesTotal:   stats.ConnStats.BytesWrittenData.Int64(),
 	}
