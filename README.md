@@ -63,7 +63,20 @@ go install github.com/torrentclaw/truespec/cmd/truespec@latest
 
 ### Requirements
 
-- [ffprobe](https://ffmpeg.org/ffprobe.html) must be available in your `PATH` (or specify with `--ffprobe`)
+- **ffprobe** is auto-downloaded if not found. Resolution order:
+  1. `--ffprobe` flag (explicit path)
+  2. `FFPROBE_PATH` environment variable
+  3. `ffprobe` in your system `PATH`
+  4. Adjacent to the `truespec` binary
+  5. Previously cached binary at `~/.cache/truespec/bin/ffprobe`
+  6. **Auto-download** from [ffbinaries.com](https://ffbinaries.com) — Linux amd64/arm64, macOS amd64 (arm64 via Rosetta 2), Windows amd64
+
+- **Whisper language detection** (optional) — enabled via `truespec config`. Auto-downloads:
+  - [whisper-cli](https://github.com/ggerganov/whisper.cpp/releases) (~15MB) from the latest whisper.cpp release
+  - [ggml-tiny.bin](https://huggingface.co/ggerganov/whisper.cpp) model (~75MB) from HuggingFace
+  - Cached to `~/.truespec/bin/` and `~/.truespec/models/`. Requires `ffmpeg` in PATH. CPU-only, no GPU required.
+
+> **Windows notes:** temp directory defaults to `%TEMP%\truespec`, auto-downloaded binaries use `.exe` suffix, and file writes use a remove-then-rename strategy for Windows compatibility.
 
 ## Usage
 
@@ -105,11 +118,17 @@ truespec config --show
 # View scan statistics
 truespec stats
 
+# View stats in JSON format
+truespec stats --json
+
+# View stats from a specific file
+truespec stats --file /path/to/stats.json
+
 # Reset statistics
 truespec stats --reset
 ```
 
-### Flags
+### Scan Flags
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
@@ -117,11 +136,29 @@ truespec stats --reset
 | `--stall-timeout` | | `90` | Seconds before killing a stalled torrent |
 | `--max-timeout` | | `600` | Absolute max seconds per torrent |
 | `--ffprobe` | | auto | Path to ffprobe binary |
-| `--temp-dir` | | `/tmp/truespec` | Temp directory for downloads |
+| `--temp-dir` | | OS temp + `/truespec` | Temp directory for downloads |
 | `--verbose` | `-v` | `false` | Print progress to stderr |
 | `--output` | `-o` | `results_<timestamp>.json` | Output file path |
 | `-f` | | | Read hashes/magnets from file |
 | `--stdin` | | `false` | Read hashes/magnets from stdin |
+| `--stats-file` | | `~/.truespec/stats.json` | Path to persistent stats file |
+| `--no-stats` | | `false` | Disable stats tracking for this scan |
+
+### Config Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--show` | `false` | Show current configuration without modifying |
+| `--json` | `false` | Output current configuration as JSON |
+| `--reset` | `false` | Reset configuration to defaults |
+
+### Stats Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | `false` | Output raw JSON |
+| `--reset` | `false` | Reset all stats |
+| `--file` | `~/.truespec/stats.json` | Path to stats file |
 
 ### Environment Variables
 
@@ -131,6 +168,7 @@ truespec stats --reset
 | `TRUESPEC_STALL_TIMEOUT` | Stall timeout in seconds |
 | `TRUESPEC_MAX_TIMEOUT` | Max timeout in seconds |
 | `TRUESPEC_TEMP_DIR` | Temp directory |
+| `TRUESPEC_STATS_FILE` | Path to persistent stats JSON file (default: `~/.truespec/stats.json`) |
 | `FFPROBE_PATH` | Path to ffprobe |
 | `WHISPER_PATH` | Path to whisper-cli binary |
 | `WHISPER_MODEL` | Path to whisper ggml model |
@@ -155,9 +193,9 @@ Results are saved as JSON:
         "codec": "hevc",
         "width": 3840,
         "height": 2160,
-        "bit_depth": 10,
+        "bitDepth": 10,
         "hdr": "HDR10",
-        "frame_rate": 23.976,
+        "frameRate": 23.976,
         "profile": "Main 10"
       },
       "audio": [
@@ -171,6 +209,10 @@ Results are saved as JSON:
         "total": 5,
         "total_size": 4500000000,
         "video_files": [{"path": "Movie.mkv", "size": 4400000000, "ext": ".mkv"}],
+        "audio_files": [],
+        "sub_files": [],
+        "image_files": [],
+        "other_files": [],
         "suspicious": [
           {
             "path": "setup.exe",
@@ -235,18 +277,20 @@ Results are saved as JSON:
 ├── internal/
 │   ├── config.go            # Configuration & defaults
 │   ├── downloader.go        # BitTorrent partial download engine
+│   ├── ffprobe_download.go  # Auto-download static ffprobe binary
+│   ├── fileutil.go          # Cross-platform file utilities (atomicRename)
 │   ├── input.go             # Input normalization (hash, magnet, .torrent)
 │   ├── lang.go              # Language code normalization
+│   ├── langdetect.go        # Whisper-based audio language detection
 │   ├── media.go             # ffprobe integration & metadata extraction
 │   ├── scanner.go           # Scan orchestration & retry logic
 │   ├── stats.go             # Persistent statistics tracking
 │   ├── threat.go            # File threat detection (30+ extensions)
+│   ├── types.go             # Data structures
+│   ├── userconfig.go        # User configuration (~/.truespec/config.json)
 │   ├── virustotal.go        # VirusTotal API v3 client
 │   ├── vtscan.go            # VT integration for scan results
-│   ├── langdetect.go        # Whisper-based audio language detection
-│   ├── userconfig.go        # User configuration (~/.truespec/config.json)
-│   ├── whisper_download.go  # Auto-download whisper-cli & models
-│   └── types.go             # Data structures
+│   └── whisper_download.go  # Auto-download whisper-cli & models
 ├── examples/
 │   └── hashes.txt           # Sample info hashes
 ├── .github/
@@ -256,6 +300,7 @@ Results are saved as JSON:
 ├── .goreleaser.yml          # Cross-platform build config
 ├── lefthook.yml             # Git hooks (commit lint, gofmt, govet)
 ├── Makefile                 # Dev workflow (build, test, lint, release)
+├── CHANGELOG.md             # Version history
 ├── LICENSE                  # AGPL-3.0
 ├── CONTRIBUTING.md          # Contribution guidelines
 └── README.md

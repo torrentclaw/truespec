@@ -74,18 +74,18 @@ type TorrentFiles struct {
 
 // FileInfo represents a single file within a torrent.
 type FileInfo struct {
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	Ext    string `json:"ext"`
-	Reason string `json:"reason,omitempty"` // why it's suspicious
+	Path   string        `json:"path"`
+	Size   int64         `json:"size"`
+	Ext    string        `json:"ext"`
+	Reason string        `json:"reason,omitempty"` // why it's suspicious
 	VT     *VTFileReport `json:"vt,omitempty"`     // VirusTotal scan result
 }
 
 // SwarmInfo contains live peer/seeder data from the BitTorrent swarm.
 type SwarmInfo struct {
-	ActivePeers int   `json:"active_peers"`
-	TotalPeers  int   `json:"total_peers"`
-	Seeds       int   `json:"seeds"`
-	DownloadBytesTotal int64 `json:"download_bytes_total"` // bytes per second at snapshot
-	UploadBytesTotal   int64 `json:"upload_bytes_total"`
+	ActivePeers        int   `json:"active_peers"`
+	TotalPeers         int   `json:"total_peers"`
+	Seeds              int   `json:"seeds"`
+	DownloadBytesTotal int64 `json:"download_bytes_total"` // cumulative bytes downloaded
+	UploadBytesTotal   int64 `json:"upload_bytes_total"`   // cumulative bytes uploaded
 }

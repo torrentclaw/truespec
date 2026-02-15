@@ -10,7 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
+
+var (
+	ffprobeAPIClient = &http.Client{Timeout: 30 * time.Second}
+	ffprobeDLClient  = &http.Client{Timeout: 10 * time.Minute}
+)
+
+const maxFFprobeZipSize = 100 * 1024 * 1024 // 100MB max for downloaded zip
 
 const ffbinariesAPI = "https://ffbinaries.com/api/v1/version/latest"
 
@@ -87,7 +95,7 @@ func DownloadFFprobe() (string, error) {
 
 	fmt.Fprintf(os.Stderr, "ffprobe not found — downloading for %s...\n", platform)
 
-	resp, err := http.Get(url)
+	resp, err := ffprobeDLClient.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -97,7 +105,7 @@ func DownloadFFprobe() (string, error) {
 		return "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
 	}
 
-	zipData, err := io.ReadAll(resp.Body)
+	zipData, err := io.ReadAll(io.LimitReader(resp.Body, maxFFprobeZipSize))
 	if err != nil {
 		return "", fmt.Errorf("download read failed: %w", err)
 	}
@@ -125,7 +133,7 @@ func DownloadFFprobe() (string, error) {
 }
 
 func resolveFFprobeURL(platform string) (string, error) {
-	resp, err := http.Get(ffbinariesAPI)
+	resp, err := ffprobeAPIClient.Get(ffbinariesAPI)
 	if err != nil {
 		return "", fmt.Errorf("cannot reach ffbinaries.com: %w", err)
 	}
