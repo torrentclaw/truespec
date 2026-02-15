@@ -38,6 +38,8 @@ func main() {
 		runScan(os.Args[2:])
 	case "stats":
 		runStatsCmd(os.Args[2:])
+	case "config":
+		runConfigCmd(os.Args[2:])
 	case "version":
 		fmt.Printf("truespec %s\n", version)
 	case "--help", "-h", "help":
@@ -58,17 +60,17 @@ Usage:
   truespec scan [flags] -f <file>
   truespec scan [flags] --stdin
   truespec stats [--json] [--reset]
+  truespec config [--show] [--json] [--reset]
   truespec version
 
 Inputs can be info hashes, magnet links, .torrent files, or directories
 containing .torrent files.
 
-The scan command partially downloads torrent files and extracts verified
-media metadata (audio tracks, subtitles, video codec/resolution/HDR) using
-ffprobe. Results are saved to a JSON file (default: results_<timestamp>.json).
-
-The stats command displays accumulated scan statistics (traffic, quality
-distribution, performance). Stats are saved to ~/.truespec/stats.json.
+Commands:
+  scan     Partially download torrents and extract verified media metadata
+  stats    Display accumulated scan statistics
+  config   Configure TrueSpec features (interactive wizard)
+  version  Show version
 
 Examples:
   truespec scan abc123def456...
@@ -79,11 +81,207 @@ Examples:
   cat hashes.txt | truespec scan --stdin --verbose
   truespec stats
   truespec stats --json
-  truespec stats --reset
+  truespec config
+  truespec config --show
 
 Run 'truespec scan --help' for scan-specific flags.
 `, version)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// CONFIG COMMAND
+// ═══════════════════════════════════════════════════════════════════
+
+func runConfigCmd(args []string) {
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	var showOnly bool
+	var jsonOutput bool
+	var reset bool
+
+	fs.BoolVar(&showOnly, "show", false, "Show current configuration without modifying")
+	fs.BoolVar(&jsonOutput, "json", false, "Output current configuration as JSON")
+	fs.BoolVar(&reset, "reset", false, "Reset configuration to defaults")
+
+	fs.Parse(args)
+
+	if reset {
+		cfg := internal.DefaultUserConfig()
+		if err := cfg.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resetting config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "Configuration reset to defaults.")
+		return
+	}
+
+	if jsonOutput {
+		cfg := internal.LoadUserConfig()
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		encoder.Encode(cfg)
+		return
+	}
+
+	if showOnly {
+		cfg := internal.LoadUserConfig()
+		fmt.Print(cfg.ShowConfig())
+		return
+	}
+
+	// Interactive wizard
+	runConfigWizard()
+}
+
+func runConfigWizard() {
+	fmt.Fprintf(os.Stderr, "truespec %s — Configuration\n\n", version)
+
+	// Load existing config (or defaults)
+	cfg := internal.LoadUserConfig()
+
+	// ── Section 1: Core features ──
+	coreForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Track scan statistics?").
+				Description("Saves stats (traffic, quality distributions, performance) to ~/.truespec/stats.json").
+				Value(&cfg.StatsEnabled),
+
+			huh.NewConfirm().
+				Title("Analyze torrent files for threats?").
+				Description("Detects dangerous files (.exe, .bat, .dll, etc.) in torrent contents").
+				Value(&cfg.ThreatScanEnabled),
+
+			huh.NewConfirm().
+				Title("Share anonymous scan results with the community?").
+				Description("Helps improve quality data for everyone. No personal info is shared.").
+				Value(&cfg.ShareAnonymous),
+		).Title("Core Features"),
+	)
+
+	if err := coreForm.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cancelled.\n")
+		os.Exit(0)
+	}
+
+	// ── Section 2: Language detection ──
+	whisperForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Detect audio language with Whisper?").
+				Description("When a torrent has a single audio track marked as 'und' (undefined),\nuse whisper.cpp to detect the spoken language (~2s per torrent, CPU only).\nRequires ~75MB download for the model.").
+				Value(&cfg.WhisperEnabled),
+		).Title("Language Detection"),
+	)
+
+	if err := whisperForm.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cancelled.\n")
+		os.Exit(0)
+	}
+
+	// If whisper enabled, download it
+	if cfg.WhisperEnabled {
+		fmt.Fprintln(os.Stderr, "")
+		whisperPath, modelPath, err := internal.DownloadWhisper()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: Could not install whisper: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Language detection will be disabled. Run 'truespec config' again to retry.\n")
+			cfg.WhisperEnabled = false
+		} else {
+			cfg.WhisperPath = whisperPath
+			cfg.WhisperModel = modelPath
+			fmt.Fprintf(os.Stderr, "\nWhisper installed successfully!\n")
+		}
+	}
+
+	// ── Section 3: VirusTotal (optional) ──
+	var vtKey string
+	if cfg.VirusTotalAPIKey != "" {
+		vtKey = cfg.VirusTotalAPIKey
+	}
+
+	vtForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("VirusTotal API key (optional, press Enter to skip)").
+				Description("Used to scan suspicious files found in torrents.\nFree key: https://www.virustotal.com/gui/sign-in → API key").
+				Placeholder("paste your API key here").
+				Value(&vtKey),
+		).Title("VirusTotal Integration"),
+	)
+
+	if err := vtForm.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cancelled.\n")
+		os.Exit(0)
+	}
+	cfg.VirusTotalAPIKey = strings.TrimSpace(vtKey)
+
+	// ── Section 4: Scan defaults ──
+	concurrencyStr := strconv.Itoa(cfg.Concurrency)
+	stallStr := strconv.Itoa(cfg.StallTimeout)
+	maxStr := strconv.Itoa(cfg.MaxTimeout)
+
+	scanForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Default concurrency (parallel downloads)").
+				Value(&concurrencyStr).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(s)
+					if err != nil || n < 1 || n > 50 {
+						return fmt.Errorf("must be between 1 and 50")
+					}
+					return nil
+				}),
+			huh.NewInput().
+				Title("Stall timeout (seconds with no progress)").
+				Value(&stallStr).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(s)
+					if err != nil || n < 10 {
+						return fmt.Errorf("must be at least 10 seconds")
+					}
+					return nil
+				}),
+			huh.NewInput().
+				Title("Max timeout per torrent (seconds)").
+				Value(&maxStr).
+				Validate(func(s string) error {
+					n, err := strconv.Atoi(s)
+					if err != nil || n < 60 {
+						return fmt.Errorf("must be at least 60 seconds")
+					}
+					return nil
+				}),
+		).Title("Scan Defaults"),
+	)
+
+	if err := scanForm.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cancelled.\n")
+		os.Exit(0)
+	}
+
+	cfg.Concurrency, _ = strconv.Atoi(concurrencyStr)
+	cfg.StallTimeout, _ = strconv.Atoi(stallStr)
+	cfg.MaxTimeout, _ = strconv.Atoi(maxStr)
+
+	// Mark as configured
+	cfg.Configured = true
+
+	// Save
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Configuration saved!")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Print(cfg.ShowConfig())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STATS COMMAND
+// ═══════════════════════════════════════════════════════════════════
 
 func runStatsCmd(args []string) {
 	cfg := internal.DefaultConfig()
@@ -130,10 +328,18 @@ func runStatsCmd(args []string) {
 	fmt.Print(internal.FormatStats(s))
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// INTERACTIVE MODE
+// ═══════════════════════════════════════════════════════════════════
+
 func runInteractive() {
 	fmt.Fprintf(os.Stderr, "truespec %s — Interactive Mode\n\n", version)
 
 	cfg := internal.DefaultConfig()
+
+	// Apply user config
+	ucfg := internal.LoadUserConfig()
+	ucfg.ApplyToConfig(&cfg)
 
 	var source string
 	var pasteInput string
@@ -305,8 +511,16 @@ func runInteractive() {
 	executeScan(cfg, hashes)
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// SCAN COMMAND
+// ═══════════════════════════════════════════════════════════════════
+
 func runScan(args []string) {
 	cfg := internal.DefaultConfig()
+
+	// Apply user config as base defaults
+	ucfg := internal.LoadUserConfig()
+	ucfg.ApplyToConfig(&cfg)
 
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	fs.IntVar(&cfg.Concurrency, "concurrency", cfg.Concurrency, "Maximum concurrent torrent downloads")
@@ -335,7 +549,7 @@ func runScan(args []string) {
 
 	fs.Parse(args)
 
-	// Apply parsed durations
+	// Apply parsed durations (CLI flags override user config)
 	cfg.StallTimeout = time.Duration(stallSec) * time.Second
 	cfg.MaxTimeout = time.Duration(maxSec) * time.Second
 

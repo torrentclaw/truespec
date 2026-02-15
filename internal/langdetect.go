@@ -143,22 +143,33 @@ func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath st
 }
 
 // ResolveLangDetect finds whisper-cli and model, returns a configured LangDetectConfig.
+// It checks: 1) UserConfig paths, 2) env vars, 3) known install locations, 4) PATH.
 // Returns with Enabled=false if whisper is not available (not an error).
 func ResolveLangDetect() LangDetectConfig {
 	cfg := LangDetectConfig{}
 
-	// Find whisper-cli
+	// Check user config first — if whisper is explicitly disabled, skip
+	ucfg := LoadUserConfig()
+	if ucfg.Configured && !ucfg.WhisperEnabled {
+		return cfg
+	}
+
+	// Find whisper-cli: UserConfig path → env → ~/.truespec/bin → ~/local/bin → PATH
 	cfg.WhisperPath = findBinary("whisper-cli",
+		ucfg.WhisperPath,
 		os.Getenv("WHISPER_PATH"),
+		filepath.Join(WhisperBinDir(), "whisper-cli"),
 		filepath.Join(homeDir(), "local", "bin", "whisper-cli"),
 	)
 	if cfg.WhisperPath == "" {
 		return cfg
 	}
 
-	// Find model
+	// Find model: UserConfig path → env → ~/.truespec/models → ~/local/whisper-models → cache
 	cfg.ModelPath = findFile(
+		ucfg.WhisperModel,
 		os.Getenv("WHISPER_MODEL"),
+		filepath.Join(WhisperModelDir(), "ggml-tiny.bin"),
 		filepath.Join(homeDir(), "local", "whisper-models", "ggml-tiny.bin"),
 		filepath.Join(homeDir(), ".cache", "whisper", "ggml-tiny.bin"),
 	)
@@ -192,7 +203,6 @@ func ShouldDetectLanguage(result *ScanResult) bool {
 }
 
 func findBinary(name string, candidates ...string) string {
-	// Check explicit candidates first
 	for _, c := range candidates {
 		if c != "" {
 			if _, err := os.Stat(c); err == nil {
@@ -200,7 +210,6 @@ func findBinary(name string, candidates ...string) string {
 			}
 		}
 	}
-	// Search PATH
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
@@ -248,16 +257,13 @@ func ApplyLangDetection(ctx context.Context, cfg LangDetectConfig, result *ScanR
 		return
 	}
 
-	// Normalize the detected language
 	normalized := NormalizeLang(detected.Language)
 
 	log.Printf("  [%s] detected language: %s (confidence: %.1f%%, took %dms)",
 		truncHash(result.InfoHash), normalized, detected.Confidence*100, detected.ElapsedMs)
 
-	// Update the audio track
 	result.Audio[0].Lang = normalized
 
-	// Add detection metadata to audio track title
 	confPct := int(detected.Confidence * 100)
 	detectionNote := fmt.Sprintf("detected:%s(%d%%)", normalized, confPct)
 	if result.Audio[0].Title != "" {
@@ -266,6 +272,5 @@ func ApplyLangDetection(ctx context.Context, cfg LangDetectConfig, result *ScanR
 		result.Audio[0].Title = "[" + detectionNote + "]"
 	}
 
-	// Recompute languages
 	result.Languages = ComputeLanguages(nil, result.Audio)
 }
