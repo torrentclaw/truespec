@@ -76,7 +76,8 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 
 				result := processOne(ctx, dl, cfg, h)
 
-				// Capture traffic stats before cleanup
+				// Capture traffic stats BEFORE cleanup — the torrent must
+				// still be in the client for stats to be available.
 				var downloaded, uploaded int64
 				if stats != nil {
 					downloaded, uploaded = dl.GetTorrentStats(h)
@@ -86,11 +87,15 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 					mu.Unlock()
 				}
 
+				// Cleanup AFTER stats capture — this drops the torrent from
+				// the client and removes temporary files.
+				dl.Cleanup(h)
+
 				results <- result
 
 				if cfg.Verbose {
-					log.Printf("[%d/%d] %s -> %s (%dms)",
-						idx+1, len(hashes), truncHash(h), result.Status, result.ElapsedMs)
+					log.Printf("[%d/%d] %s -> %s (%dms, dl=%d)",
+						idx+1, len(hashes), truncHash(h), result.Status, result.ElapsedMs, downloaded)
 				}
 			}(hash, i)
 		}
@@ -107,6 +112,8 @@ func Scan(ctx context.Context, cfg Config, hashes []string) <-chan ScanResult {
 	return ScanWithStats(ctx, cfg, hashes, nil)
 }
 
+// processOne handles a single torrent scan. It does NOT call Cleanup —
+// the caller is responsible for cleanup after capturing stats.
 func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string) ScanResult {
 	// Resolve language detection config once (cached after first call)
 	langCfg := ResolveLangDetect()
@@ -129,7 +136,6 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 		if swarm != nil {
 			result.Swarm = swarm
 		}
-		dl.Cleanup(infoHash)
 		return result
 	}
 
@@ -152,8 +158,7 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 	// Resolve ffprobe (done per-torrent to support concurrent access)
 	ffprobePath, err := ResolveFFprobe(cfg.FFprobePath)
 	if err != nil {
-		dl.Cleanup(infoHash)
-		result := ScanResult{
+		return ScanResult{
 			InfoHash:  infoHash,
 			Status:    "error",
 			Error:     err.Error(),
@@ -161,7 +166,6 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			Files:     torrentFiles,
 			Swarm:     swarmInfo,
 		}
-		return result
 	}
 
 	// Try ffprobe, with retries requesting more data
@@ -188,7 +192,6 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			ApplyLangDetection(ctx, langCfg, media, dlResult.FilePath)
 
 			media.ElapsedMs = time.Since(start).Milliseconds()
-			dl.Cleanup(infoHash)
 			return *media
 		}
 
@@ -201,7 +204,6 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			}
 
 			if err := dl.RequestMorePieces(ctx, infoHash, minBytes); err != nil {
-				dl.Cleanup(infoHash)
 				result := errorResult(infoHash, err, start)
 				result.Files = torrentFiles
 				result.Swarm = swarmInfo
@@ -212,7 +214,6 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 	}
 
 	// All retries exhausted
-	dl.Cleanup(infoHash)
 	return ScanResult{
 		InfoHash:  infoHash,
 		Status:    "ffprobe_failed",
