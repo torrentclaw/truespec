@@ -21,7 +21,10 @@ Given torrent info hashes, magnet links, or `.torrent` files, TrueSpec:
 - **Video**: codec (H.264, HEVC, AV1...), resolution, bit depth, HDR format (HDR10, Dolby Vision, HLG), frame rate, profile
 - **Audio**: all tracks with language, codec (AAC, AC3, DTS...), channel count (stereo, 5.1, 7.1...)
 - **Subtitles**: all tracks with language, format (SRT, ASS...), forced/default flags
-- **Languages**: normalized ISO 639-1 codes extracted from audio tracks
+- **Languages**: normalized ISO 639-1 codes extracted from audio tracks (with Whisper detection for unknown languages)
+- **File threats**: detects 30+ dangerous file extensions (.exe, .bat, .dll...) in torrent contents
+- **VirusTotal integration**: scans suspicious files against 70+ antivirus engines (hash lookup + auto-upload for files ≤ 20MB)
+- **Swarm health**: real-time seeder count, peer count, and traffic stats
 
 ## Use cases
 
@@ -39,6 +42,11 @@ Given torrent info hashes, magnet links, or `.torrent` files, TrueSpec:
 - **Smart piece selection** — handles MP4 moov atoms at end of file
 - **Stall detection** and automatic retries with increasing byte thresholds
 - **Language normalization** — maps all language tags to ISO 639-1 codes
+- **Whisper language detection** — detects audio language for "und" tracks using whisper.cpp (offline, CPU-only)
+- **File threat analysis** — scans torrent contents for dangerous files (executables, scripts, suspicious patterns)
+- **VirusTotal integration** — checks suspicious files against 70+ antivirus engines (free API, no file uploads for known hashes)
+- **Statistics tracking** — persistent scan stats with hourly/daily breakdowns, quality distribution, traffic totals
+- **Configuration wizard** — `truespec config` for first-time setup (Whisper, VirusTotal, scan defaults)
 - **Cross-platform** — Linux, macOS, Windows (amd64 & arm64)
 
 ## Installation
@@ -87,6 +95,18 @@ truespec scan \
   --verbose \
   --output results.json \
   -f examples/hashes.txt
+
+# Configure TrueSpec (interactive wizard)
+truespec config
+
+# Show current configuration
+truespec config --show
+
+# View scan statistics
+truespec stats
+
+# Reset statistics
+truespec stats --reset
 ```
 
 ### Flags
@@ -112,6 +132,8 @@ truespec scan \
 | `TRUESPEC_MAX_TIMEOUT` | Max timeout in seconds |
 | `TRUESPEC_TEMP_DIR` | Temp directory |
 | `FFPROBE_PATH` | Path to ffprobe |
+| `WHISPER_PATH` | Path to whisper-cli binary |
+| `WHISPER_MODEL` | Path to whisper ggml model |
 
 ## Output
 
@@ -145,6 +167,35 @@ Results are saved as JSON:
         { "lang": "es", "codec": "subrip", "forced": false, "default": false }
       ],
       "languages": ["en"],
+      "files": {
+        "total": 5,
+        "total_size": 4500000000,
+        "video_files": [{"path": "Movie.mkv", "size": 4400000000, "ext": ".mkv"}],
+        "suspicious": [
+          {
+            "path": "setup.exe",
+            "size": 2100000,
+            "ext": ".exe",
+            "reason": "Windows executable",
+            "vt": {
+              "detected": true,
+              "detections": 18,
+              "total_engines": 72,
+              "malware_names": ["Trojan.GenericKD", "Win32.Malware"],
+              "permalink": "https://www.virustotal.com/gui/file/sha256...",
+              "status": "vt_malware"
+            }
+          }
+        ],
+        "threat_level": "vt_malware"
+      },
+      "swarm": {
+        "active_peers": 12,
+        "total_peers": 45,
+        "seeds": 8,
+        "download_bytes_total": 15728640,
+        "upload_bytes_total": 0
+      },
       "elapsed_ms": 32000
     }
   ]
@@ -163,6 +214,17 @@ Results are saved as JSON:
 | `timeout` | Exceeded absolute max timeout |
 | `error` | Unexpected error |
 
+### Threat Levels
+
+| Level | Meaning |
+|-------|---------|
+| `clean` | No suspicious files found |
+| `warning` | Archives found (.zip, .rar) that may contain executables |
+| `dangerous` | Executable or script files found (not yet verified by VT) |
+| `vt_clean` | Suspicious files were scanned by VirusTotal and confirmed clean |
+| `vt_malware` | VirusTotal confirmed malware (N/72+ engines detected) |
+| `suspicious_unscanned` | File too large for VT upload (>20MB) or VT unavailable |
+
 ## Project Structure
 
 ```
@@ -177,6 +239,13 @@ Results are saved as JSON:
 │   ├── lang.go              # Language code normalization
 │   ├── media.go             # ffprobe integration & metadata extraction
 │   ├── scanner.go           # Scan orchestration & retry logic
+│   ├── stats.go             # Persistent statistics tracking
+│   ├── threat.go            # File threat detection (30+ extensions)
+│   ├── virustotal.go        # VirusTotal API v3 client
+│   ├── vtscan.go            # VT integration for scan results
+│   ├── langdetect.go        # Whisper-based audio language detection
+│   ├── userconfig.go        # User configuration (~/.truespec/config.json)
+│   ├── whisper_download.go  # Auto-download whisper-cli & models
 │   └── types.go             # Data structures
 ├── examples/
 │   └── hashes.txt           # Sample info hashes
@@ -194,12 +263,17 @@ Results are saved as JSON:
 
 ## Roadmap
 
-- [ ] **TorrentClaw API integration** — `truespec scan --push` to submit verified specs directly to the [torrentclaw.com](https://torrentclaw.com) central database, so anyone running TrueSpec can help enrich the shared metadata for the entire community
+- [x] **File threat analysis** — detect dangerous files in torrent contents
+- [x] **VirusTotal integration** — scan suspicious files against 70+ antivirus engines
+- [x] **Whisper language detection** — offline audio language detection for "und" tracks
+- [x] **Statistics tracking** — persistent scan stats with quality distribution
+- [x] **Configuration wizard** — interactive setup for all features
+- [ ] **TorrentClaw API integration** — `truespec scan --push` to submit verified specs directly to the [torrentclaw.com](https://torrentclaw.com) central database
 - [ ] **Daemon mode** — run as a background service that continuously processes hashes from a queue
-- [ ] **Docker image** — prebuilt container with ffprobe included
+- [ ] **Docker image** — prebuilt container with ffprobe and whisper included
 - [ ] **More output formats** — CSV, NDJSON for streaming pipelines
-- [ ] **Concurrency optimizations** — smarter scheduling, connection pooling, and reduced overhead per torrent to improve throughput at scale
-- [ ] **Bandwidth reduction** — minimize downloaded bytes by improving piece selection heuristics, caching torrent metadata, and skipping re-scans of known hashes
+- [ ] **Concurrency optimizations** — smarter scheduling, connection pooling
+- [ ] **Bandwidth reduction** — smarter piece selection, metadata caching, skip re-scans
 
 > **Note:** TrueSpec uses BitTorrent traffic to fetch torrent fragments. It is not recommended to run it on VPS or servers with limited/metered bandwidth, as scan volume can add up quickly.
 

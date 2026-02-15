@@ -78,6 +78,7 @@ type FileInfo struct {
 	Size   int64  `json:"size"`
 	Ext    string `json:"ext"`
 	Reason string `json:"reason,omitempty"` // why it's suspicious
+	VT     *VTFileReport `json:"vt,omitempty"`     // VirusTotal scan result
 }
 
 // SwarmInfo contains live peer/seeder data from the BitTorrent swarm.
