@@ -9,10 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
-
-	"github.com/anacrolix/torrent/metainfo"
 )
 
 // VTScanConfig configures the VirusTotal integration for scan results.
@@ -210,78 +206,18 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// findLocalFile tries to find a torrent file on disk in the downloader's temp directory.
+// findLocalFile tries to find a torrent file on disk via the Downloader.
 func findLocalFile(dl *Downloader, infoHash string, filePath string) string {
 	if dl == nil {
 		return ""
 	}
-
-	hash := metainfo.NewHashFromHex(infoHash)
-	t, ok := dl.client.Torrent(hash)
-	if !ok {
-		return ""
-	}
-
-	candidates := []string{
-		filepath.Join(dl.cfg.TempDir, t.Name(), filePath),
-		filepath.Join(dl.cfg.TempDir, filePath),
-	}
-
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() {
-			return c
-		}
-		if info, err := os.Stat(c + ".part"); err == nil && !info.IsDir() {
-			return c + ".part"
-		}
-	}
-
-	return ""
+	return dl.FindLocalFile(infoHash, filePath)
 }
 
-// ensureFullFile downloads the complete file from the torrent if not already complete.
-// Returns the local path to the fully downloaded file.
+// ensureFullFile downloads the complete file from the torrent via the Downloader.
 func ensureFullFile(ctx context.Context, dl *Downloader, infoHash string, filePath string) (string, error) {
 	if dl == nil {
 		return "", fmt.Errorf("no downloader available")
 	}
-
-	hash := metainfo.NewHashFromHex(infoHash)
-	t, ok := dl.client.Torrent(hash)
-	if !ok {
-		return "", fmt.Errorf("torrent %s not found", truncHash(infoHash))
-	}
-
-	// Find the target file in the torrent
-	for _, f := range t.Files() {
-		dp := f.DisplayPath()
-		if dp == filePath || f.Path() == filePath || strings.HasSuffix(dp, filePath) {
-			// Request all pieces for this file
-			f.Download()
-
-			// Wait for completion
-			dlCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-dlCtx.Done():
-					return "", fmt.Errorf("timeout downloading %s", filePath)
-				case <-ticker.C:
-					if f.BytesCompleted() >= f.Length() {
-						localPath := findLocalFile(dl, infoHash, filePath)
-						if localPath != "" {
-							return localPath, nil
-						}
-						return "", fmt.Errorf("file completed but not found on disk")
-					}
-				}
-			}
-		}
-	}
-
-	return "", fmt.Errorf("file %s not found in torrent", filePath)
+	return dl.DownloadFullFile(ctx, infoHash, filePath)
 }

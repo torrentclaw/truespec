@@ -27,6 +27,7 @@ var defaultTrackers = []string{
 var videoExtensions = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true,
 	".m4v": true, ".wmv": true, ".ts": true,
+	".mov": true,
 }
 
 // mp4Extensions are formats where the moov atom may be at the end of the file.
@@ -86,34 +87,44 @@ func NewDownloader(cfg DownloadConfig) (*Downloader, error) {
 }
 
 // GetTorrentStats returns the download and upload bytes for a specific torrent.
-// Returns (0, 0) if the torrent is not found.
+// Returns (0, 0) if the torrent is not found or the handle is stale.
 func (d *Downloader) GetTorrentStats(infoHash string) (downloaded, uploaded int64) {
 	hash := metainfo.NewHashFromHex(infoHash)
 	t, ok := d.client.Torrent(hash)
 	if !ok {
 		return 0, 0
 	}
+	// The torrent handle may reference a dropped/closed torrent, causing
+	// nil-pointer panics when accessing internal state. Recover gracefully.
+	defer func() {
+		if r := recover(); r != nil {
+			downloaded, uploaded = 0, 0
+		}
+	}()
 	stats := t.Stats()
 	return stats.ConnStats.BytesReadData.Int64(), stats.ConnStats.BytesWrittenData.Int64()
 }
 
-// GetClientStats returns the total download and upload bytes for the entire client.
-func (d *Downloader) GetClientStats() (downloaded, uploaded int64) {
-	stats := d.client.Stats()
-	return stats.BytesRead.Int64(), stats.BytesWritten.Int64()
-}
-
 // GetFileList extracts the complete file listing from a torrent's metadata.
 // Must be called after metadata has been resolved (after PartialDownload).
-func (d *Downloader) GetFileList(infoHash string) []FileInfo {
+// Returns nil if the torrent is not found or the handle is stale.
+func (d *Downloader) GetFileList(infoHash string) (result []FileInfo) {
 	hash := metainfo.NewHashFromHex(infoHash)
 	t, ok := d.client.Torrent(hash)
 	if !ok {
 		return nil
 	}
 
+	// The torrent handle may reference a dropped/closed torrent, causing
+	// nil-pointer panics when accessing internal state. Recover gracefully.
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+		}
+	}()
+
 	files := t.Files()
-	result := make([]FileInfo, 0, len(files))
+	result = make([]FileInfo, 0, len(files))
 
 	for _, f := range files {
 		path := f.DisplayPath()
@@ -130,12 +141,21 @@ func (d *Downloader) GetFileList(infoHash string) []FileInfo {
 
 // GetSwarmInfo captures a snapshot of the torrent's swarm health.
 // Must be called while the torrent is still active (before Cleanup).
-func (d *Downloader) GetSwarmInfo(infoHash string) *SwarmInfo {
+// Returns nil if the torrent is not found or the handle is stale.
+func (d *Downloader) GetSwarmInfo(infoHash string) (result *SwarmInfo) {
 	hash := metainfo.NewHashFromHex(infoHash)
 	t, ok := d.client.Torrent(hash)
 	if !ok {
 		return nil
 	}
+
+	// The torrent handle may reference a dropped/closed torrent, causing
+	// nil-pointer panics when accessing internal state. Recover gracefully.
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+		}
+	}()
 
 	stats := t.Stats()
 
@@ -151,7 +171,7 @@ func (d *Downloader) GetSwarmInfo(infoHash string) *SwarmInfo {
 		ActivePeers:        stats.ActivePeers,
 		TotalPeers:         stats.TotalPeers,
 		Seeds:              seeds,
-		DownloadBytesTotal: stats.ConnStats.BytesReadData.Int64(), // cumulative, caller can compute rate
+		DownloadBytesTotal: stats.ConnStats.BytesReadData.Int64(),
 		UploadBytesTotal:   stats.ConnStats.BytesWrittenData.Int64(),
 	}
 }
@@ -241,12 +261,23 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		return nil, err
 	}
 
-	// Build the local file path.
-	// anacrolix/torrent stores files under DataDir using the torrent name and file path.
-	// IMPORTANT: Incomplete files get a ".part" suffix from anacrolix/torrent.
-	// File.Path() returns path components within the torrent — for multi-file torrents
-	// it sometimes includes t.Name() as a prefix, causing duplicated directories when
-	// combined with t.Name() again.
+	filePath, err := d.resolveFilePath(t, videoFile, infoHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DownloadResult{
+		FilePath: filePath,
+		FileName: filepath.Base(videoFile.DisplayPath()),
+		Ext:      ext,
+	}, nil
+}
+
+// resolveFilePath locates the downloaded video file on disk.
+// anacrolix/torrent stores files under DataDir using the torrent name and file path,
+// but the exact layout varies (single-file vs multi-file, wrapper dirs, .part suffix).
+// This method tries multiple candidate paths and falls back to a recursive walk.
+func (d *Downloader) resolveFilePath(t *torrent.Torrent, videoFile *torrent.File, infoHash string) (string, error) {
 	tName := t.Name()
 	vPath := videoFile.Path()
 	vDisplay := videoFile.DisplayPath()
@@ -257,7 +288,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		filepath.Join(d.cfg.TempDir, tName, vDisplay),
 		filepath.Join(d.cfg.TempDir, vPath),
 		filepath.Join(d.cfg.TempDir, vDisplay),
-		filepath.Join(d.cfg.TempDir, tName, vBase), // basename only, no internal path components
+		filepath.Join(d.cfg.TempDir, tName, vBase),
 		filepath.Join(d.cfg.TempDir, tName),
 	}
 
@@ -278,8 +309,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		candidates = append(candidates, p, p+".part")
 	}
 
-	// Retry file lookup a few times — the storage backend may not have flushed
-	// all data to disk immediately after pieces are marked complete.
+	// Retry a few times — the storage backend may not have flushed to disk yet.
 	filePath := ""
 	for attempt := 0; attempt < 3; attempt++ {
 		for _, c := range candidates {
@@ -293,10 +323,9 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		}
 
 		// Fallback: walk the torrent directory to find the video file by name.
-		// Handles torrents with wrapper directories (e.g. "www.UIndex.org - <name>/...")
-		// where the static candidate paths don't match the actual nested structure.
-		targetBase := filepath.Base(videoFile.DisplayPath())
-		torrentDir := filepath.Join(d.cfg.TempDir, t.Name())
+		// Handles wrapper directories (e.g. "www.UIndex.org - <name>/...").
+		targetBase := filepath.Base(vDisplay)
+		torrentDir := filepath.Join(d.cfg.TempDir, tName)
 		_ = filepath.WalkDir(torrentDir, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil || entry.IsDir() {
 				return nil
@@ -309,8 +338,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 			return nil
 		})
 
-		// For single-file torrents, torrentDir is a file path not a directory,
-		// so also walk TempDir itself to find the file by basename.
+		// For single-file torrents, torrentDir is the file itself — walk TempDir.
 		if filePath == "" {
 			_ = filepath.WalkDir(d.cfg.TempDir, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil || entry.IsDir() {
@@ -337,36 +365,36 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	}
 
 	if filePath == "" {
-		log.Printf("  [%s] file not found", infoHash[:8])
-		log.Printf("    torrent name: %s", tName)
-		log.Printf("    video Path(): %s", vPath)
-		log.Printf("    video DisplayPath(): %s", vDisplay)
-		log.Printf("    temp dir: %s", d.cfg.TempDir)
-		// Always list directory contents for debugging, not just in verbose mode
-		torrentDir := filepath.Join(d.cfg.TempDir, tName)
-		if entries, err := os.ReadDir(torrentDir); err == nil {
-			log.Printf("    files in %s:", torrentDir)
+		d.logFileNotFound(infoHash, tName, vPath, vDisplay)
+		return "", fmt.Errorf("downloaded file not found on disk for %s", infoHash[:8])
+	}
+
+	return filePath, nil
+}
+
+// logFileNotFound prints diagnostic info when a downloaded file can't be located.
+func (d *Downloader) logFileNotFound(infoHash, tName, vPath, vDisplay string) {
+	log.Printf("  [%s] file not found", infoHash[:8])
+	log.Printf("    torrent name: %s", tName)
+	log.Printf("    video Path(): %s", vPath)
+	log.Printf("    video DisplayPath(): %s", vDisplay)
+	log.Printf("    temp dir: %s", d.cfg.TempDir)
+
+	torrentDir := filepath.Join(d.cfg.TempDir, tName)
+	if entries, err := os.ReadDir(torrentDir); err == nil {
+		log.Printf("    files in %s:", torrentDir)
+		for _, e := range entries {
+			log.Printf("      %s", e.Name())
+		}
+	} else {
+		log.Printf("    cannot list %s: %v", torrentDir, err)
+		if entries, err := os.ReadDir(d.cfg.TempDir); err == nil {
+			log.Printf("    files in %s:", d.cfg.TempDir)
 			for _, e := range entries {
 				log.Printf("      %s", e.Name())
 			}
-		} else {
-			log.Printf("    cannot list %s: %v", torrentDir, err)
-			// For single-file torrents torrentDir is the file itself, list TempDir
-			if entries, err := os.ReadDir(d.cfg.TempDir); err == nil {
-				log.Printf("    files in %s:", d.cfg.TempDir)
-				for _, e := range entries {
-					log.Printf("      %s", e.Name())
-				}
-			}
 		}
-		return nil, fmt.Errorf("downloaded file not found on disk for %s", infoHash[:8])
 	}
-
-	return &DownloadResult{
-		FilePath: filePath,
-		FileName: filepath.Base(videoFile.DisplayPath()),
-		Ext:      ext,
-	}, nil
 }
 
 // RequestMorePieces requests additional pieces for a torrent that's already active.
@@ -429,8 +457,11 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 	defer ticker.Stop()
 
 	deadline := time.After(d.cfg.MaxTimeout)
-	lastProgressAt := time.Now()
+	now := time.Now()
+	lastPieceAt := now
+	lastBytesAt := now
 	lastCompleted := 0
+	lastBytes := int64(0)
 
 	for {
 		select {
@@ -454,21 +485,29 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 				return nil
 			}
 
-			// Track progress
-			now := time.Now()
+			// Track progress at piece and byte level
+			now = time.Now()
+			stats := t.Stats()
+			bytesNow := stats.ConnStats.BytesReadData.Int64()
+
 			if completed > lastCompleted {
-				lastProgressAt = now
+				lastPieceAt = now
 				lastCompleted = completed
 			}
+			if bytesNow > lastBytes {
+				lastBytesAt = now
+				lastBytes = bytesNow
+			}
 
-			// Stall detection: no progress for StallTimeout and no peers
-			stats := t.Stats()
-			hasPeers := stats.ActivePeers > 0
-			stallDuration := now.Sub(lastProgressAt)
+			// Stall detection: no progress at either level for StallTimeout.
+			// This catches both no-peer stalls AND leecher-only swarms where
+			// peers are connected but nobody sends data.
+			pieceStall := now.Sub(lastPieceAt) > d.cfg.StallTimeout
+			byteStall := now.Sub(lastBytesAt) > d.cfg.StallTimeout
 
-			if stallDuration > d.cfg.StallTimeout && !hasPeers {
-				return fmt.Errorf("stall: no progress for %s and no peers for %s",
-					stallDuration.Round(time.Second), infoHash[:8])
+			if pieceStall && byteStall {
+				return fmt.Errorf("stall: no progress for %s for %s",
+					now.Sub(lastPieceAt).Round(time.Second), infoHash[:8])
 			}
 
 			if d.cfg.Verbose && completed > 0 {
@@ -481,6 +520,8 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 
 // Cleanup removes a torrent and its downloaded files.
 func (d *Downloader) Cleanup(infoHash string) {
+	defer func() { recover() }()
+
 	hash := metainfo.NewHashFromHex(infoHash)
 	if t, ok := d.client.Torrent(hash); ok {
 		name := t.Name()
@@ -491,6 +532,85 @@ func (d *Downloader) Cleanup(infoHash string) {
 		// Also try the file directly (single-file torrents)
 		os.Remove(filepath.Join(d.cfg.TempDir, name))
 	}
+}
+
+// FindLocalFile tries to locate a torrent file on disk in the temp directory.
+// Returns the local path if found, or empty string if not.
+func (d *Downloader) FindLocalFile(infoHash string, filePath string) (result string) {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return ""
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+		}
+	}()
+
+	candidates := []string{
+		filepath.Join(d.cfg.TempDir, t.Name(), filePath),
+		filepath.Join(d.cfg.TempDir, filePath),
+	}
+
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+		if info, err := os.Stat(c + ".part"); err == nil && !info.IsDir() {
+			return c + ".part"
+		}
+	}
+
+	return ""
+}
+
+// DownloadFullFile downloads a specific file completely from a torrent.
+// Returns the local path to the fully downloaded file.
+func (d *Downloader) DownloadFullFile(ctx context.Context, infoHash string, filePath string) (localPath string, err error) {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return "", fmt.Errorf("torrent %s not found", infoHash[:8])
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			localPath = ""
+			err = fmt.Errorf("torrent handle invalid: %v", r)
+		}
+	}()
+
+	for _, f := range t.Files() {
+		dp := f.DisplayPath()
+		if dp == filePath || f.Path() == filePath || strings.HasSuffix(dp, filePath) {
+			f.Download()
+
+			dlCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-dlCtx.Done():
+					return "", fmt.Errorf("timeout downloading %s", filePath)
+				case <-ticker.C:
+					if f.BytesCompleted() >= f.Length() {
+						lp := d.FindLocalFile(infoHash, filePath)
+						if lp != "" {
+							return lp, nil
+						}
+						return "", fmt.Errorf("file completed but not found on disk")
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("file %s not found in torrent", filePath)
 }
 
 // Close shuts down the BitTorrent client.
