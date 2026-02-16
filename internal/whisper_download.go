@@ -2,14 +2,18 @@ package internal
 
 import (
 	"archive/tar"
+	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,7 +21,7 @@ import (
 )
 
 const (
-	whisperReleasesAPI = "https://api.github.com/repos/ggerganov/whisper.cpp/releases/latest"
+	whisperReleasesAPI = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest"
 	whisperModelURL    = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
 	whisperModelName   = "ggml-tiny.bin"
 
@@ -35,9 +39,14 @@ var (
 	dlClient  = &http.Client{Timeout: 10 * time.Minute}
 )
 
+// errBuildFromSource signals that no prebuilt binary exists and the platform
+// requires building whisper-cli from source.
+var errBuildFromSource = errors.New("no prebuilt binary available")
+
 type ghRelease struct {
-	TagName string    `json:"tag_name"`
-	Assets  []ghAsset `json:"assets"`
+	TagName    string    `json:"tag_name"`
+	TarballURL string    `json:"tarball_url"`
+	Assets     []ghAsset `json:"assets"`
 }
 
 type ghAsset struct {
@@ -54,29 +63,18 @@ func whisperBinaryName() string {
 }
 
 // whisperAssetPattern returns the expected asset name pattern for the current platform.
+// Returns errBuildFromSource for platforms without prebuilt binaries (Linux, macOS).
 func whisperAssetPattern() (string, error) {
-	switch runtime.GOOS {
-	case "linux":
+	if runtime.GOOS == "windows" {
 		switch runtime.GOARCH {
 		case "amd64":
-			return "linux-x86_64", nil
-		case "arm64":
-			return "linux-aarch64", nil
+			return "whisper-bin-x64", nil
+		case "386":
+			return "whisper-bin-win32", nil
 		}
-	case "darwin":
-		switch runtime.GOARCH {
-		case "amd64":
-			return "darwin-x86_64", nil
-		case "arm64":
-			return "darwin-arm64", nil
-		}
-	case "windows":
-		switch runtime.GOARCH {
-		case "amd64":
-			return "win-x86_64", nil
-		case "arm64":
-			return "win-arm64", nil
-		}
+	}
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		return "", errBuildFromSource
 	}
 	return "", fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 }
@@ -92,9 +90,9 @@ func DownloadWhisper() (string, string, error) {
 
 	// Download binary if not exists
 	if _, err := os.Stat(whisperBin); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Downloading whisper-cli...\n")
+		fmt.Fprintf(os.Stderr, "Installing whisper-cli...\n")
 		if err := downloadWhisperBinary(whisperBin); err != nil {
-			return "", "", fmt.Errorf("download whisper-cli: %w", err)
+			return "", "", fmt.Errorf("install whisper-cli: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "whisper-cli installed to %s\n", whisperBin)
 	} else {
@@ -116,11 +114,6 @@ func DownloadWhisper() (string, string, error) {
 }
 
 func downloadWhisperBinary(destPath string) error {
-	pattern, err := whisperAssetPattern()
-	if err != nil {
-		return err
-	}
-
 	// Get latest release (with timeout)
 	resp, err := apiClient.Get(whisperReleasesAPI)
 	if err != nil {
@@ -137,15 +130,25 @@ func downloadWhisperBinary(destPath string) error {
 		return fmt.Errorf("parse release: %w", err)
 	}
 
-	// Find matching asset
+	// Check if we have a prebuilt binary for this platform
+	pattern, err := whisperAssetPattern()
+	if errors.Is(err, errBuildFromSource) {
+		return buildWhisperFromSource(release, destPath)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Find matching prebuilt asset (Windows)
 	assetURL := findWhisperAsset(release.Assets, pattern)
 	if assetURL == "" {
-		return fmt.Errorf("no whisper-cli release found for %s (release %s)", pattern, release.TagName)
+		// Fallback to source build even on Windows
+		fmt.Fprintf(os.Stderr, "No prebuilt binary found for %s — building from source...\n", pattern)
+		return buildWhisperFromSource(release, destPath)
 	}
 
 	fmt.Fprintf(os.Stderr, "Downloading from %s...\n", release.TagName)
 
-	// Download tar.gz (with timeout)
 	dlResp, err := dlClient.Get(assetURL)
 	if err != nil {
 		return fmt.Errorf("download asset: %w", err)
@@ -156,42 +159,276 @@ func downloadWhisperBinary(destPath string) error {
 		return fmt.Errorf("download returned %d", dlResp.StatusCode)
 	}
 
-	// Windows releases may be .zip, Unix are .tar.gz
 	if strings.HasSuffix(strings.ToLower(assetURL), ".zip") {
-		// For now, only tar.gz is supported
-		return fmt.Errorf("zip archives not yet supported; please install whisper-cli manually")
+		zipData, err := io.ReadAll(io.LimitReader(dlResp.Body, maxExtractSize))
+		if err != nil {
+			return fmt.Errorf("read zip data: %w", err)
+		}
+		return extractWhisperFromZip(zipData, destPath)
 	}
 
-	if err := extractWhisperFromTarGz(dlResp.Body, destPath); err != nil {
-		return err
-	}
-
-	return nil
+	return extractWhisperFromTarGz(dlResp.Body, destPath)
 }
 
 // findWhisperAsset searches release assets for a matching platform binary.
-// Prefers non-CUDA builds for CPU-only operation.
+// Prefers non-CUDA/BLAS builds for CPU-only operation. Supports both .zip and .tar.gz.
 func findWhisperAsset(assets []ghAsset, pattern string) string {
-	// First pass: non-CUDA tar.gz
+	lowerPattern := strings.ToLower(pattern)
+
+	// First pass: non-CUDA/BLAS archives
 	for _, a := range assets {
 		name := strings.ToLower(a.Name)
-		if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
-			if strings.Contains(name, "cuda") || strings.Contains(name, "cublas") {
-				continue
-			}
+		if !strings.Contains(name, lowerPattern) {
+			continue
+		}
+		if strings.Contains(name, "cuda") || strings.Contains(name, "cublas") || strings.Contains(name, "blas") {
+			continue
+		}
+		if strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".tar.gz") {
 			return a.BrowserDownloadURL
 		}
 	}
 
-	// Second pass: any matching tar.gz (including CUDA)
+	// Second pass: any matching archive (including CUDA/BLAS)
 	for _, a := range assets {
 		name := strings.ToLower(a.Name)
-		if strings.Contains(name, pattern) && strings.HasSuffix(name, ".tar.gz") {
+		if !strings.Contains(name, lowerPattern) {
+			continue
+		}
+		if strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".tar.gz") {
 			return a.BrowserDownloadURL
 		}
 	}
 
 	return ""
+}
+
+// extractWhisperFromZip extracts the whisper-cli binary from a zip archive.
+func extractWhisperFromZip(zipData []byte, destPath string) error {
+	r, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+
+	targetNames := map[string]bool{
+		"whisper-cli":     true,
+		"whisper-cli.exe": true,
+		"main":            true,
+		"main.exe":        true,
+	}
+
+	for _, f := range r.File {
+		base := filepath.Base(f.Name)
+		if !targetNames[base] {
+			continue
+		}
+
+		if f.UncompressedSize64 > uint64(maxExtractSize) {
+			return fmt.Errorf("archive entry %q too large (%d bytes, max %d)", f.Name, f.UncompressedSize64, maxExtractSize)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("open zip entry: %w", err)
+		}
+		defer rc.Close()
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			return fmt.Errorf("create bin dir: %w", err)
+		}
+
+		out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if err != nil {
+			return fmt.Errorf("create binary: %w", err)
+		}
+
+		limited := io.LimitReader(rc, maxExtractSize)
+		if _, err := io.Copy(out, limited); err != nil {
+			out.Close()
+			os.Remove(destPath)
+			return fmt.Errorf("extract binary: %w", err)
+		}
+		out.Close()
+		return nil
+	}
+
+	return fmt.Errorf("whisper-cli binary not found in zip archive")
+}
+
+// buildWhisperFromSource downloads the source tarball and compiles whisper-cli with cmake.
+func buildWhisperFromSource(release ghRelease, destPath string) error {
+	cmakePath, err := exec.LookPath("cmake")
+	if err != nil {
+		return fmt.Errorf("cmake not found: install cmake and a C++ compiler to build whisper-cli from source")
+	}
+
+	cxxFound := false
+	for _, cxx := range []string{"c++", "g++", "clang++"} {
+		if _, err := exec.LookPath(cxx); err == nil {
+			cxxFound = true
+			break
+		}
+	}
+	if !cxxFound {
+		return fmt.Errorf("C++ compiler not found: install g++ or clang++ to build whisper-cli")
+	}
+
+	if release.TarballURL == "" {
+		return fmt.Errorf("no source tarball URL in release %s", release.TagName)
+	}
+
+	fmt.Fprintf(os.Stderr, "No prebuilt binary for %s/%s — building from source (%s)...\n",
+		runtime.GOOS, runtime.GOARCH, release.TagName)
+
+	// Download source tarball
+	fmt.Fprintf(os.Stderr, "  Downloading source...\n")
+	srcResp, err := dlClient.Get(release.TarballURL)
+	if err != nil {
+		return fmt.Errorf("download source: %w", err)
+	}
+	defer srcResp.Body.Close()
+
+	if srcResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download source returned HTTP %d", srcResp.StatusCode)
+	}
+
+	// Extract to temp directory
+	tmpDir, err := os.MkdirTemp("", "whisper-build-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fmt.Fprintf(os.Stderr, "  Extracting source...\n")
+	srcDir, err := extractSourceTarball(srcResp.Body, tmpDir)
+	if err != nil {
+		return fmt.Errorf("extract source: %w", err)
+	}
+
+	// Configure with cmake
+	fmt.Fprintf(os.Stderr, "  Configuring (cmake)...\n")
+	buildDir := filepath.Join(srcDir, "build")
+	configCmd := exec.Command(cmakePath, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF")
+	configCmd.Dir = srcDir
+	configCmd.Stderr = os.Stderr
+	if err := configCmd.Run(); err != nil {
+		return fmt.Errorf("cmake configure failed: %w", err)
+	}
+
+	// Build whisper-cli
+	fmt.Fprintf(os.Stderr, "  Building whisper-cli (this may take a few minutes)...\n")
+	buildCmd := exec.Command(cmakePath, "--build", buildDir, "-j", "--config", "Release", "--target", "whisper-cli")
+	buildCmd.Dir = srcDir
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("cmake build failed: %w", err)
+	}
+
+	// Find the built binary
+	builtBinary := filepath.Join(buildDir, "bin", "whisper-cli")
+	if runtime.GOOS == "windows" {
+		builtBinary += ".exe"
+	}
+	if _, err := os.Stat(builtBinary); err != nil {
+		return fmt.Errorf("built binary not found at %s: %w", builtBinary, err)
+	}
+
+	// Copy binary to destination (can't os.Rename across filesystems)
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create bin dir: %w", err)
+	}
+
+	data, err := os.ReadFile(builtBinary)
+	if err != nil {
+		return fmt.Errorf("read built binary: %w", err)
+	}
+
+	if err := os.WriteFile(destPath, data, 0o755); err != nil {
+		return fmt.Errorf("write binary: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "  Build complete!\n")
+	return nil
+}
+
+// extractSourceTarball extracts a GitHub source tarball and returns the path to the root directory.
+func extractSourceTarball(r io.Reader, destDir string) (string, error) {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return "", fmt.Errorf("open gzip: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	var rootDir string
+	var totalSize int64
+	cleanDest := filepath.Clean(destDir) + string(os.PathSeparator)
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tar: %w", err)
+		}
+
+		// Skip PAX global headers (GitHub tarballs include pax_global_header)
+		if header.Typeflag == tar.TypeXGlobalHeader || header.Typeflag == tar.TypeXHeader {
+			continue
+		}
+
+		// Prevent zip-slip
+		target := filepath.Join(destDir, header.Name)
+		if !strings.HasPrefix(filepath.Clean(target)+string(os.PathSeparator), cleanDest) &&
+			filepath.Clean(target) != filepath.Clean(destDir) {
+			return "", fmt.Errorf("tar entry %q escapes destination", header.Name)
+		}
+
+		// Track root directory (first real directory entry)
+		if rootDir == "" {
+			parts := strings.SplitN(header.Name, "/", 2)
+			if len(parts) > 0 && parts[0] != "" {
+				rootDir = parts[0]
+			}
+		}
+
+		totalSize += header.Size
+		if totalSize > maxExtractSize {
+			return "", fmt.Errorf("source archive too large (exceeds %d bytes)", maxExtractSize)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return "", fmt.Errorf("create dir: %w", err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return "", fmt.Errorf("create parent dir: %w", err)
+			}
+			mode := os.FileMode(header.Mode) & 0o777
+			if mode == 0 {
+				mode = 0o644
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return "", fmt.Errorf("create file: %w", err)
+			}
+			limited := io.LimitReader(tr, header.Size+1)
+			if _, err := io.Copy(out, limited); err != nil {
+				out.Close()
+				return "", fmt.Errorf("write file: %w", err)
+			}
+			out.Close()
+		}
+	}
+
+	if rootDir == "" {
+		return "", fmt.Errorf("empty or invalid source archive")
+	}
+
+	return filepath.Join(destDir, rootDir), nil
 }
 
 func extractWhisperFromTarGz(r io.Reader, destPath string) error {
