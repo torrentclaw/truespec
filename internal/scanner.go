@@ -235,6 +235,8 @@ func errorResult(infoHash string, err error, start time.Time) ScanResult {
 		status = "timeout"
 	} else if strings.Contains(errMsg, "no video file") {
 		status = "no_video"
+	} else if strings.Contains(errMsg, "not found on disk") {
+		status = "file_not_found"
 	}
 	return ScanResult{
 		InfoHash:  infoHash,

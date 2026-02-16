@@ -239,13 +239,32 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	// Build the local file path.
 	// anacrolix/torrent stores multi-file torrents under DataDir/<torrent_name>/<file_path>.
 	// IMPORTANT: Incomplete files get a ".part" suffix from anacrolix/torrent.
-	// File.Path() returns path components within the torrent.
+	// File.Path() returns path components within the torrent — for multi-file torrents
+	// it sometimes includes t.Name() as a prefix, causing duplicated directories when
+	// combined with t.Name() again.
+	tName := t.Name()
+	vPath := videoFile.Path()
+	vDisplay := videoFile.DisplayPath()
+	vBase := filepath.Base(vDisplay)
+
 	basePaths := []string{
-		filepath.Join(d.cfg.TempDir, t.Name(), videoFile.Path()),
-		filepath.Join(d.cfg.TempDir, t.Name(), videoFile.DisplayPath()),
-		filepath.Join(d.cfg.TempDir, videoFile.Path()),
-		filepath.Join(d.cfg.TempDir, videoFile.DisplayPath()),
-		filepath.Join(d.cfg.TempDir, t.Name()),
+		filepath.Join(d.cfg.TempDir, tName, vPath),
+		filepath.Join(d.cfg.TempDir, tName, vDisplay),
+		filepath.Join(d.cfg.TempDir, vPath),
+		filepath.Join(d.cfg.TempDir, vDisplay),
+		filepath.Join(d.cfg.TempDir, tName, vBase), // basename only, no internal path components
+		filepath.Join(d.cfg.TempDir, tName),
+	}
+
+	// If Path()/DisplayPath() include t.Name() as prefix, add deduplicated candidates
+	// first to avoid TempDir/name/name/file double-nesting.
+	if strings.HasPrefix(vPath, tName+"/") {
+		rel := vPath[len(tName)+1:]
+		basePaths = append([]string{filepath.Join(d.cfg.TempDir, tName, rel)}, basePaths...)
+	}
+	if vDisplay != vPath && strings.HasPrefix(vDisplay, tName+"/") {
+		rel := vDisplay[len(tName)+1:]
+		basePaths = append([]string{filepath.Join(d.cfg.TempDir, tName, rel)}, basePaths...)
 	}
 
 	// For each base path, also try with ".part" suffix (incomplete files)
@@ -282,8 +301,21 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	}
 
 	if filePath == "" {
+		log.Printf("  [%s] file not found", infoHash[:8])
+		log.Printf("    torrent name: %s", tName)
+		log.Printf("    video Path(): %s", vPath)
+		log.Printf("    video DisplayPath(): %s", vDisplay)
+		log.Printf("    temp dir: %s", d.cfg.TempDir)
 		if d.cfg.Verbose {
-			log.Printf("  [%s] file not found, tried: %v", infoHash[:8], candidates[:6])
+			torrentDir := filepath.Join(d.cfg.TempDir, tName)
+			if entries, err := os.ReadDir(torrentDir); err == nil {
+				log.Printf("    files in %s:", torrentDir)
+				for _, e := range entries {
+					log.Printf("      %s", e.Name())
+				}
+			} else {
+				log.Printf("    cannot list %s: %v", torrentDir, err)
+			}
 		}
 		t.Drop()
 		return nil, fmt.Errorf("downloaded file not found on disk for %s", infoHash[:8])

@@ -14,7 +14,7 @@ type ScanReport struct {
 // All fields are always present (null/empty for missing data, never omitted).
 type ScanResult struct {
 	InfoHash  string          `json:"info_hash"`
-	Status    string          `json:"status"` // success, stall_metadata, stall_download, no_video, ffprobe_failed, timeout, error
+	Status    string          `json:"status"` // success, stall_metadata, stall_download, no_video, file_not_found, ffprobe_failed, timeout, error
 	File      string          `json:"file"`
 	Audio     []AudioTrack    `json:"audio"`
 	Subtitles []SubtitleTrack `json:"subtitles"`
