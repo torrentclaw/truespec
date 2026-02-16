@@ -63,6 +63,14 @@ func NewDownloader(cfg DownloadConfig) (*Downloader, error) {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 
+	// Remove stale piece-completion database from previous runs.
+	// The default file storage uses SQLite to track which pieces have been
+	// downloaded. If data files were cleaned up but the DB persists, the
+	// client may believe pieces are already available, causing file_not_found.
+	for _, f := range []string{".torrent.db", ".torrent.db-wal", ".torrent.db-shm"} {
+		os.Remove(filepath.Join(cfg.TempDir, f))
+	}
+
 	tcfg := torrent.NewDefaultClientConfig()
 	tcfg.DataDir = cfg.TempDir
 	tcfg.Seed = false
@@ -168,14 +176,12 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	case <-t.GotInfo():
 		// Metadata resolved
 	case <-metaCtx.Done():
-		t.Drop()
 		return nil, fmt.Errorf("metadata timeout for %s", infoHash[:8])
 	}
 
 	// Find largest video file
 	videoFile, err := findLargestVideo(t.Files())
 	if err != nil {
-		t.Drop()
 		return nil, err
 	}
 
@@ -232,12 +238,11 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	// Poll for piece completion with stall detection
 	err = d.waitForPieces(ctx, t, infoHash, required)
 	if err != nil {
-		t.Drop()
 		return nil, err
 	}
 
 	// Build the local file path.
-	// anacrolix/torrent stores multi-file torrents under DataDir/<torrent_name>/<file_path>.
+	// anacrolix/torrent stores files under DataDir using the torrent name and file path.
 	// IMPORTANT: Incomplete files get a ".part" suffix from anacrolix/torrent.
 	// File.Path() returns path components within the torrent — for multi-file torrents
 	// it sometimes includes t.Name() as a prefix, causing duplicated directories when
@@ -273,18 +278,23 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		candidates = append(candidates, p, p+".part")
 	}
 
+	// Retry file lookup a few times — the storage backend may not have flushed
+	// all data to disk immediately after pieces are marked complete.
 	filePath := ""
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() {
-			filePath = c
+	for attempt := 0; attempt < 3; attempt++ {
+		for _, c := range candidates {
+			if info, err := os.Stat(c); err == nil && !info.IsDir() {
+				filePath = c
+				break
+			}
+		}
+		if filePath != "" {
 			break
 		}
-	}
 
-	// Fallback: walk the torrent directory to find the video file by name.
-	// Handles torrents with wrapper directories (e.g. "www.UIndex.org    -    <name>/...")
-	// where the static candidate paths don't match the actual nested structure.
-	if filePath == "" {
+		// Fallback: walk the torrent directory to find the video file by name.
+		// Handles torrents with wrapper directories (e.g. "www.UIndex.org - <name>/...")
+		// where the static candidate paths don't match the actual nested structure.
 		targetBase := filepath.Base(videoFile.DisplayPath())
 		torrentDir := filepath.Join(d.cfg.TempDir, t.Name())
 		_ = filepath.WalkDir(torrentDir, func(path string, entry fs.DirEntry, err error) error {
@@ -298,6 +308,32 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 			}
 			return nil
 		})
+
+		// For single-file torrents, torrentDir is a file path not a directory,
+		// so also walk TempDir itself to find the file by basename.
+		if filePath == "" {
+			_ = filepath.WalkDir(d.cfg.TempDir, func(path string, entry fs.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return nil
+				}
+				base := filepath.Base(path)
+				if base == targetBase || base == targetBase+".part" {
+					filePath = path
+					return filepath.SkipAll
+				}
+				return nil
+			})
+		}
+
+		if filePath != "" {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(1 * time.Second)
+			if d.cfg.Verbose {
+				log.Printf("  [%s] file not found on disk, retrying (%d/3)...", infoHash[:8], attempt+2)
+			}
+		}
 	}
 
 	if filePath == "" {
@@ -306,18 +342,23 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		log.Printf("    video Path(): %s", vPath)
 		log.Printf("    video DisplayPath(): %s", vDisplay)
 		log.Printf("    temp dir: %s", d.cfg.TempDir)
-		if d.cfg.Verbose {
-			torrentDir := filepath.Join(d.cfg.TempDir, tName)
-			if entries, err := os.ReadDir(torrentDir); err == nil {
-				log.Printf("    files in %s:", torrentDir)
+		// Always list directory contents for debugging, not just in verbose mode
+		torrentDir := filepath.Join(d.cfg.TempDir, tName)
+		if entries, err := os.ReadDir(torrentDir); err == nil {
+			log.Printf("    files in %s:", torrentDir)
+			for _, e := range entries {
+				log.Printf("      %s", e.Name())
+			}
+		} else {
+			log.Printf("    cannot list %s: %v", torrentDir, err)
+			// For single-file torrents torrentDir is the file itself, list TempDir
+			if entries, err := os.ReadDir(d.cfg.TempDir); err == nil {
+				log.Printf("    files in %s:", d.cfg.TempDir)
 				for _, e := range entries {
 					log.Printf("      %s", e.Name())
 				}
-			} else {
-				log.Printf("    cannot list %s: %v", torrentDir, err)
 			}
 		}
-		t.Drop()
 		return nil, fmt.Errorf("downloaded file not found on disk for %s", infoHash[:8])
 	}
 
