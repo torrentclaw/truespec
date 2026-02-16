@@ -39,8 +39,72 @@ func TestShouldDetectLanguage_MultipleUnd(t *testing.T) {
 		},
 	}
 
+	if !ShouldDetectLanguage(result) {
+		t.Error("should detect language when ALL tracks are und")
+	}
+}
+
+func TestShouldDetectLanguage_MixedKnownAndUnd(t *testing.T) {
+	result := &ScanResult{
+		Status: "success",
+		Audio: []AudioTrack{
+			{Lang: "en", Codec: "aac", Channels: 2},
+			{Lang: "und", Codec: "ac3", Channels: 6},
+		},
+	}
+
 	if ShouldDetectLanguage(result) {
-		t.Error("should NOT detect language for multiple tracks (even if all und)")
+		t.Error("should NOT detect when at least one track has known language")
+	}
+}
+
+func TestUndefinedTrackIndices(t *testing.T) {
+	audio := []AudioTrack{
+		{Lang: "und", Codec: "aac", Channels: 2},
+		{Lang: "en", Codec: "ac3", Channels: 6},
+		{Lang: "", Codec: "aac", Channels: 2},
+	}
+
+	indices := undefinedTrackIndices(audio)
+	if len(indices) != 2 {
+		t.Errorf("expected 2 undefined indices, got %d", len(indices))
+	}
+	if indices[0] != 0 || indices[1] != 2 {
+		t.Errorf("expected indices [0, 2], got %v", indices)
+	}
+}
+
+func TestUndefinedTrackIndices_AllUnd(t *testing.T) {
+	audio := []AudioTrack{
+		{Lang: "und", Codec: "aac", Channels: 2},
+		{Lang: "unknown", Codec: "ac3", Channels: 6},
+		{Lang: "", Codec: "eac3", Channels: 8},
+	}
+
+	indices := undefinedTrackIndices(audio)
+	if len(indices) != 3 {
+		t.Errorf("expected 3 undefined indices, got %d", len(indices))
+	}
+}
+
+func TestEffectiveMaxTracks_Default(t *testing.T) {
+	cfg := LangDetectConfig{}
+	if got := effectiveMaxTracks(cfg); got != DefaultWhisperMaxTracks {
+		t.Errorf("expected default %d, got %d", DefaultWhisperMaxTracks, got)
+	}
+}
+
+func TestEffectiveMaxTracks_Custom(t *testing.T) {
+	cfg := LangDetectConfig{MaxTracks: 5}
+	if got := effectiveMaxTracks(cfg); got != 5 {
+		t.Errorf("expected 5, got %d", got)
+	}
+}
+
+func TestEffectiveMaxTracks_Zero(t *testing.T) {
+	cfg := LangDetectConfig{MaxTracks: 0}
+	if got := effectiveMaxTracks(cfg); got != DefaultWhisperMaxTracks {
+		t.Errorf("expected default %d for zero value, got %d", DefaultWhisperMaxTracks, got)
 	}
 }
 

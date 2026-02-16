@@ -22,6 +22,7 @@ type LangDetectConfig struct {
 	ModelPath   string // path to ggml-tiny.bin model
 	FFmpegPath  string // path to ffmpeg binary
 	Enabled     bool   // whether language detection is enabled
+	MaxTracks   int    // max audio tracks to detect per torrent (0 = use DefaultWhisperMaxTracks)
 }
 
 // LangDetectResult holds the result of a language detection attempt.
@@ -51,7 +52,7 @@ var (
 // DetectAudioLanguage extracts a short audio clip from the video file and uses
 // whisper.cpp to detect the spoken language. Returns nil if detection fails
 // or is not applicable.
-func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath string) (*LangDetectResult, error) {
+func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath string, audioStreamIndex int) (*LangDetectResult, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -70,7 +71,7 @@ func DetectAudioLanguage(ctx context.Context, cfg LangDetectConfig, videoPath st
 	ffmpegCmd := exec.CommandContext(ffmpegCtx, cfg.FFmpegPath,
 		"-i", videoPath,
 		"-t", "30", // 30 seconds
-		"-vn",          // no video
+		"-map", fmt.Sprintf("0:a:%d", audioStreamIndex), // select specific audio stream
 		"-ar", "16000", // 16kHz sample rate
 		"-ac", "1", // mono
 		"-f", "wav", // wav format
@@ -201,20 +202,51 @@ func resolveLangDetectInner() LangDetectConfig {
 	}
 
 	cfg.Enabled = true
+	cfg.MaxTracks = ucfg.WhisperMaxTracks
 	return cfg
 }
 
+// isUnknownLang returns true if a language tag is undefined/empty.
+func isUnknownLang(lang string) bool {
+	l := strings.ToLower(lang)
+	return l == "und" || l == "" || l == "undefined" || l == "unknown"
+}
+
 // ShouldDetectLanguage checks if language detection should run for a scan result.
-// Only triggers when there's exactly one audio track and its language is "und".
+// Triggers when ALL audio tracks have unknown language. If any track has a known
+// language, we skip detection entirely (the known tags are trustworthy enough).
 func ShouldDetectLanguage(result *ScanResult) bool {
 	if result == nil || result.Status != "success" {
 		return false
 	}
-	if len(result.Audio) != 1 {
+	if len(result.Audio) == 0 {
 		return false
 	}
-	lang := strings.ToLower(result.Audio[0].Lang)
-	return lang == "und" || lang == "" || lang == "undefined" || lang == "unknown"
+	for _, track := range result.Audio {
+		if !isUnknownLang(track.Lang) {
+			return false // at least one track has a known language - skip
+		}
+	}
+	return true
+}
+
+// effectiveMaxTracks returns the max tracks limit, falling back to DefaultWhisperMaxTracks.
+func effectiveMaxTracks(cfg LangDetectConfig) int {
+	if cfg.MaxTracks > 0 {
+		return cfg.MaxTracks
+	}
+	return DefaultWhisperMaxTracks
+}
+
+// undefinedTrackIndices returns the indices of audio tracks with unknown language.
+func undefinedTrackIndices(audio []AudioTrack) []int {
+	var indices []int
+	for i, track := range audio {
+		if isUnknownLang(track.Lang) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 func findBinary(name string, candidates ...string) string {
@@ -254,37 +286,48 @@ func homeDir() string {
 }
 
 // ApplyLangDetection runs language detection on a scan result if applicable.
+// Analyzes all audio tracks with unknown language using Whisper.
 // Modifies the result in-place: updates audio track lang and adds detection info.
 func ApplyLangDetection(ctx context.Context, cfg LangDetectConfig, result *ScanResult, videoPath string) {
 	if !ShouldDetectLanguage(result) {
 		return
 	}
 
-	log.Printf("  [%s] audio language is 'und', attempting whisper detection...", truncHash(result.InfoHash))
-
-	detected, err := DetectAudioLanguage(ctx, cfg, videoPath)
-	if err != nil {
-		log.Printf("  [%s] language detection failed: %v", truncHash(result.InfoHash), err)
-		return
+	indices := undefinedTrackIndices(result.Audio)
+	maxT := effectiveMaxTracks(cfg)
+	if len(indices) > maxT {
+		log.Printf("  [%s] %d undefined audio tracks, capping to %d", truncHash(result.InfoHash), len(indices), maxT)
+		indices = indices[:maxT]
 	}
 
-	if detected == nil || detected.Language == "" {
-		return
-	}
+	log.Printf("  [%s] %d audio track(s) with unknown language, attempting whisper detection...",
+		truncHash(result.InfoHash), len(indices))
 
-	normalized := NormalizeLang(detected.Language)
+	for _, i := range indices {
+		detected, err := DetectAudioLanguage(ctx, cfg, videoPath, i)
+		if err != nil {
+			log.Printf("  [%s] language detection failed for track %d: %v", truncHash(result.InfoHash), i, err)
+			continue
+		}
 
-	log.Printf("  [%s] detected language: %s (confidence: %.1f%%, took %dms)",
-		truncHash(result.InfoHash), normalized, detected.Confidence*100, detected.ElapsedMs)
+		if detected == nil || detected.Language == "" {
+			continue
+		}
 
-	result.Audio[0].Lang = normalized
+		normalized := NormalizeLang(detected.Language)
 
-	confPct := int(detected.Confidence * 100)
-	detectionNote := fmt.Sprintf("detected:%s(%d%%)", normalized, confPct)
-	if result.Audio[0].Title != "" {
-		result.Audio[0].Title = result.Audio[0].Title + " [" + detectionNote + "]"
-	} else {
-		result.Audio[0].Title = "[" + detectionNote + "]"
+		log.Printf("  [%s] track %d: detected language: %s (confidence: %.1f%%, took %dms)",
+			truncHash(result.InfoHash), i, normalized, detected.Confidence*100, detected.ElapsedMs)
+
+		result.Audio[i].Lang = normalized
+
+		confPct := int(detected.Confidence * 100)
+		detectionNote := fmt.Sprintf("detected:%s(%d%%)", normalized, confPct)
+		if result.Audio[i].Title != "" {
+			result.Audio[i].Title = result.Audio[i].Title + " [" + detectionNote + "]"
+		} else {
+			result.Audio[i].Title = "[" + detectionNote + "]"
+		}
 	}
 
 	result.Languages = ComputeLanguages(nil, result.Audio)

@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// DefaultWhisperMaxTracks is the default maximum number of audio tracks to
+// run language detection on per torrent.
+const DefaultWhisperMaxTracks = 3
+
 // UserConfig is the persistent user configuration saved to ~/.truespec/config.json.
 // It controls which features are enabled. CLI flags override these values at runtime.
 type UserConfig struct {
@@ -18,9 +22,10 @@ type UserConfig struct {
 	ShareAnonymous bool `json:"share_anonymous"` // share anonymous scan results with community
 
 	// Language detection
-	WhisperEnabled bool   `json:"whisper_enabled"` // detect language for "und" audio tracks
-	WhisperPath    string `json:"whisper_path"`    // path to whisper-cli binary (auto-set on install)
-	WhisperModel   string `json:"whisper_model"`   // path to ggml model file (auto-set on install)
+	WhisperEnabled   bool   `json:"whisper_enabled"`    // detect language for "und" audio tracks
+	WhisperPath      string `json:"whisper_path"`       // path to whisper-cli binary (auto-set on install)
+	WhisperModel     string `json:"whisper_model"`      // path to ggml model file (auto-set on install)
+	WhisperMaxTracks int    `json:"whisper_max_tracks"` // max audio tracks to detect per torrent (0 = default 3)
 
 	// Threat detection
 	ThreatScanEnabled bool   `json:"threat_scan_enabled"` // analyze torrent files for threats
@@ -159,6 +164,11 @@ func (c *UserConfig) ShowConfig() string {
 	if c.WhisperEnabled {
 		s += fmt.Sprintf("    Binary:             %s\n", valueOrNA(c.WhisperPath))
 		s += fmt.Sprintf("    Model:              %s\n", valueOrNA(c.WhisperModel))
+		maxT := c.WhisperMaxTracks
+		if maxT <= 0 {
+			maxT = DefaultWhisperMaxTracks
+		}
+		s += fmt.Sprintf("    Max tracks/torrent: %d\n", maxT)
 	}
 	s += fmt.Sprintf("  VirusTotal API key:   %s\n", maskAPIKey(c.VirusTotalAPIKey))
 	s += fmt.Sprintf("\n  Concurrency:          %d\n", c.Concurrency)

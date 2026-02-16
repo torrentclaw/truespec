@@ -168,7 +168,7 @@ func runConfigWizard() {
 		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Detect audio language with Whisper?").
-				Description("When a torrent has a single audio track marked as 'und' (undefined),\nuse whisper.cpp to detect the spoken language (~2s per torrent, CPU only).\nRequires ~75MB download for the model.").
+				Description("When audio tracks are marked as 'und' (undefined),\nuse whisper.cpp to detect the spoken language (~2s per track, CPU only).\nAnalyzes up to 3 tracks per torrent (configurable via whisper_max_tracks).\nRequires ~75MB download for the model.").
 				Value(&cfg.WhisperEnabled),
 		).Title("Language Detection"),
 	)
