@@ -22,6 +22,10 @@ import (
 var version = "dev"
 
 func main() {
+	// Must be the first call — may re-exec the process via syscall.Exec,
+	// which requires no goroutines or resources to have been initialized.
+	ensureClassicFileIO()
+
 	// Subcommand dispatch
 	if len(os.Args) < 2 {
 		// No subcommand: launch interactive mode if terminal, else show usage
@@ -44,6 +48,8 @@ func main() {
 		fmt.Printf("truespec %s\n", version)
 	case "--help", "-h", "help":
 		printUsage()
+	case "_worker":
+		runWorker()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
 		printUsage()
@@ -786,3 +792,89 @@ func cleanTempDir(dir string) {
 type devNull struct{}
 
 func (devNull) Write(p []byte) (int, error) { return len(p), nil }
+
+// ensureClassicFileIO prevents SIGBUS crashes from mmap-based piece hashing in
+// the anacrolix/torrent storage layer. The library defaults to mmap file I/O
+// on Linux, which causes fatal bus errors when files are truncated during
+// concurrent piece verification (race between openForWrite truncation and
+// pieceHasher reads). Setting TORRENT_STORAGE_DEFAULT_FILE_IO=classic switches
+// to os.File-based I/O that handles truncation gracefully (EOF, not SIGBUS).
+//
+// The env var is read during the storage package's init(), which runs before
+// main(), so we must re-exec to ensure it's set in time.
+func ensureClassicFileIO() {
+	const envKey = "TORRENT_STORAGE_DEFAULT_FILE_IO"
+
+	// If already set (either by user or by a previous re-exec), nothing to do.
+	// Invalid values are caught by the library's init() which panics before
+	// main() runs, so we only need to check for presence here.
+	if _, ok := os.LookupEnv(envKey); ok {
+		return
+	}
+
+	os.Setenv(envKey, "classic")
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot determine executable path: %v — mmap storage active, SIGBUS risk\n", err)
+		return
+	}
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: re-exec failed (%v) — mmap storage active, SIGBUS risk\n", err)
+	}
+}
+
+// runWorker is the entry point for worker subprocesses.
+// It reads WorkerInput from stdin, runs the scan, and writes WorkerOutput to stdout.
+func runWorker() {
+	// Protect stdout from any stray prints by dependencies:
+	// save the original fd and redirect os.Stdout to os.Stderr.
+	// The result JSON will be written directly to the saved fd.
+	originalStdout := os.Stdout
+	os.Stdout = os.Stderr
+
+	// Ensure we write a result even if we panic
+	defer func() {
+		if r := recover(); r != nil {
+			// Panic during worker execution
+			output := internal.WorkerOutput{
+				Result: internal.ScanResult{
+					Status: "worker_error",
+					Error:  fmt.Sprintf("panic: %v", r),
+				},
+			}
+			_ = json.NewEncoder(originalStdout).Encode(output)
+		}
+	}()
+
+	// Read WorkerInput from stdin
+	var input internal.WorkerInput
+	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
+		// Can't even read input — write minimal error result
+		output := internal.WorkerOutput{
+			Result: internal.ScanResult{
+				InfoHash: "unknown",
+				Status:   "worker_error",
+				Error:    fmt.Sprintf("decode input: %v", err),
+			},
+		}
+		_ = json.NewEncoder(originalStdout).Encode(output)
+		os.Exit(1)
+	}
+
+	// Configure logging to stderr (already redirected)
+	log.SetOutput(os.Stderr)
+	log.SetFlags(log.Ltime)
+	if !input.Verbose {
+		log.SetOutput(devNull{})
+	}
+
+	// Run the worker
+	output := internal.RunWorker(input)
+
+	// Write result to the original stdout fd
+	if err := json.NewEncoder(originalStdout).Encode(output); err != nil {
+		// Can't write output — this is fatal, exit with error
+		fmt.Fprintf(os.Stderr, "Error encoding worker output: %v\n", err)
+		os.Exit(1)
+	}
+}

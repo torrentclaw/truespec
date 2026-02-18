@@ -2,7 +2,10 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -10,35 +13,50 @@ import (
 
 // ScanWithStats is like Scan but also records stats for each result.
 // The stats object is updated concurrently (caller must not access it until channel is closed).
+//
+// Internally, it tries to use subprocess isolation for crash resilience.
+// If os.Executable() fails (e.g., in minimal containers), it falls back to
+// in-process execution with a shared Downloader (original behavior).
 func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stats) <-chan ScanResult {
 	results := make(chan ScanResult, cfg.Concurrency)
 
 	go func() {
 		defer close(results)
 
-		dl, err := NewDownloader(DownloadConfig{
-			TempDir:      cfg.TempDir,
-			StallTimeout: cfg.StallTimeout,
-			MaxTimeout:   cfg.MaxTimeout,
-			Verbose:      cfg.Verbose,
-			MinBytesMKV:  cfg.MinBytesMKV,
-			MinBytesMP4:  cfg.MinBytesMP4,
-		})
-		if err != nil {
-			for _, h := range hashes {
-				result := ScanResult{
-					InfoHash: h,
-					Status:   "error",
-					Error:    "failed to create downloader: " + err.Error(),
+		// Try to get executable path for subprocess isolation
+		exePath, exeErr := getExePath()
+		useIsolation := exeErr == nil
+
+		var dl *Downloader
+		if !useIsolation {
+			// Fallback: create shared downloader for in-process mode
+			dl, exeErr = NewDownloader(DownloadConfig{
+				TempDir:      cfg.TempDir,
+				StallTimeout: cfg.StallTimeout,
+				MaxTimeout:   cfg.MaxTimeout,
+				Verbose:      cfg.Verbose,
+				MinBytesMKV:  cfg.MinBytesMKV,
+				MinBytesMP4:  cfg.MinBytesMP4,
+			})
+			if exeErr != nil {
+				for _, h := range hashes {
+					result := ScanResult{
+						InfoHash: h,
+						Status:   "error",
+						Error:    "failed to create downloader: " + exeErr.Error(),
+					}
+					if stats != nil {
+						stats.RecordResult(result, 0)
+					}
+					results <- result
 				}
-				if stats != nil {
-					stats.RecordResult(result, 0)
-				}
-				results <- result
+				return
 			}
-			return
+			defer dl.Close()
+			if cfg.Verbose {
+				log.Printf("subprocess isolation unavailable, using in-process mode: %v", exeErr)
+			}
 		}
-		defer dl.Close()
 
 		sem := make(chan struct{}, cfg.Concurrency)
 		var wg sync.WaitGroup
@@ -70,30 +88,42 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				if cfg.Verbose {
-					log.Printf("[%d/%d] scanning %s", idx+1, len(hashes), truncHash(h))
+				var result ScanResult
+				var downloaded, uploaded int64
+
+				if useIsolation {
+					// Subprocess isolation mode
+					workerInput := cfg.ToWorkerInput(h, idx+1, len(hashes))
+					workerOutput, wErr := processOneIsolated(ctx, exePath, workerInput)
+					if wErr != nil {
+						result = ScanResult{
+							InfoHash:  h,
+							Status:    "worker_failed",
+							Error:     fmt.Sprintf("worker failed: %v", wErr),
+							ElapsedMs: 0,
+						}
+					} else {
+						result = workerOutput.Result
+						downloaded = workerOutput.Downloaded
+						uploaded = workerOutput.Uploaded
+					}
+				} else {
+					// Fallback in-process mode
+					result, downloaded, uploaded = processOneInProcess(ctx, dl, cfg, h, idx+1, len(hashes))
 				}
 
-				result := processOne(ctx, dl, cfg, h)
-
-				// Capture traffic stats BEFORE cleanup — the torrent must
-				// still be in the client for stats to be available.
-				var downloaded, uploaded int64
+				// Record stats
 				if stats != nil {
-					downloaded, uploaded = dl.GetTorrentStats(h)
 					mu.Lock()
 					stats.RecordResult(result, downloaded)
 					stats.RecordTraffic(0, uploaded) // download already counted in RecordResult
 					mu.Unlock()
 				}
 
-				// Cleanup AFTER stats capture — this drops the torrent from
-				// the client and removes temporary files.
-				dl.Cleanup(h)
-
 				results <- result
 
-				if cfg.Verbose {
+				if cfg.Verbose && !useIsolation {
+					// In-process mode logs are already written by processOneInProcess
 					log.Printf("[%d/%d] %s -> %s (%dms, dl=%d)",
 						idx+1, len(hashes), truncHash(h), result.Status, result.ElapsedMs, downloaded)
 				}
@@ -251,4 +281,15 @@ func truncHash(h string) string {
 		return h[:8]
 	}
 	return h
+}
+
+// getExePath returns the path to the current executable.
+// Returns an error if the path cannot be determined (e.g., in minimal containers).
+func getExePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	// Resolve symlinks to get the real path
+	return filepath.EvalSymlinks(exe)
 }

@@ -66,3 +66,22 @@ func envString(key, fallback string) string {
 	}
 	return fallback
 }
+
+// ToWorkerInput creates a WorkerInput from Config for a specific torrent.
+// This is used when spawning worker subprocesses for isolated torrent processing.
+func (c Config) ToWorkerInput(infoHash string, index, total int) WorkerInput {
+	return WorkerInput{
+		InfoHash:       infoHash,
+		Index:          index,
+		Total:          total,
+		FFprobePath:    c.FFprobePath,
+		TempDir:        c.TempDir,
+		StallTimeout:   int(c.StallTimeout / time.Second),
+		MaxTimeout:     int(c.MaxTimeout / time.Second),
+		TimeoutSeconds: int(c.MaxTimeout / time.Second), // absolute timeout for worker
+		MinBytesMKV:    c.MinBytesMKV,
+		MinBytesMP4:    c.MinBytesMP4,
+		MaxRetries:     c.MaxFFprobeRetries,
+		Verbose:        c.Verbose,
+	}
+}
