@@ -77,7 +77,7 @@ func TestPrefixWriter(t *testing.T) {
 	var got []byte
 	w := &prefixWriter{
 		prefix: []byte("[test] "),
-		w:      writerFunc(func(p []byte) (int, error) {
+		w: writerFunc(func(p []byte) (int, error) {
 			got = append(got, p...)
 			return len(p), nil
 		}),
@@ -135,8 +135,8 @@ func TestWorkerErrorResult(t *testing.T) {
 
 func TestSignalName(t *testing.T) {
 	tests := []struct {
-		sig     syscall.Signal
-		want    string
+		sig  syscall.Signal
+		want string
 	}{
 		{syscall.SIGBUS, "SIGBUS"},
 		{syscall.SIGSEGV, "SIGSEGV"},
@@ -216,10 +216,10 @@ func TestProcessOneInProcess_Timing(t *testing.T) {
 
 	// Create a minimal config
 	cfg := Config{
-		TempDir:      os.TempDir(),
-		Verbose:      false,
-		MinBytesMKV:  1024,
-		MinBytesMP4:  1024,
+		TempDir:           os.TempDir(),
+		Verbose:           false,
+		MinBytesMKV:       1024,
+		MinBytesMP4:       1024,
 		MaxFFprobeRetries: 0,
 	}
 
