@@ -13,9 +13,14 @@ import (
 	"strings"
 )
 
-// ffprobeOutput matches the JSON structure from `ffprobe -show_streams`.
+// ffprobeOutput matches the JSON structure from `ffprobe -show_streams -show_format`.
 type ffprobeOutput struct {
 	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
+}
+
+type ffprobeFormat struct {
+	Duration string `json:"duration"`
 }
 
 type ffprobeStream struct {
@@ -31,6 +36,7 @@ type ffprobeStream struct {
 	ColorTransfer  string            `json:"color_transfer"`
 	ColorPrimaries string            `json:"color_primaries"`
 	RFrameRate     string            `json:"r_frame_rate"`
+	Duration       string            `json:"duration"`
 	Tags           map[string]string `json:"tags"`
 	Disposition    map[string]int    `json:"disposition"`
 	SideDataList   []sideData        `json:"side_data_list"`
@@ -52,6 +58,7 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*ScanR
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
+		"-show_format",
 		filePath,
 	)
 
@@ -173,6 +180,13 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*ScanR
 				vi.Profile = s.Profile
 			}
 
+			// Duration: prefer format.duration, fallback to stream duration
+			if dur := parseDuration(data.Format.Duration); dur > 0 {
+				vi.Duration = dur
+			} else if dur := parseDuration(s.Duration); dur > 0 {
+				vi.Duration = dur
+			}
+
 			videoInfo = vi
 		}
 	}
@@ -260,4 +274,38 @@ func containsAny(s string, substrs ...string) bool {
 		}
 	}
 	return false
+}
+
+// parseDuration converts a duration string (e.g. "7423.500000") to float64 seconds.
+func parseDuration(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	d, err := strconv.ParseFloat(s, 64)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return math.Round(d*1000) / 1000 // round to millisecond precision
+}
+
+// ProbeDuration runs ffprobe on a file and returns only the duration in seconds.
+// Returns 0 if duration cannot be determined (partial file, unsupported format, etc.).
+func ProbeDuration(ctx context.Context, ffprobePath, filePath string) float64 {
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_format",
+		"--", filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	var data struct {
+		Format ffprobeFormat `json:"format"`
+	}
+	if err := json.Unmarshal(output, &data); err != nil {
+		return 0
+	}
+	return parseDuration(data.Format.Duration)
 }

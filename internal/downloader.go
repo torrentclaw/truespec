@@ -628,6 +628,79 @@ func buildMagnet(infoHash string) string {
 	return "magnet:?" + strings.Join(params, "&")
 }
 
+// DownloadFileHeader downloads the first minBytes of a specific file in a torrent.
+// For MP4/M4V it also downloads end bytes (moov atom). Returns the local file path.
+// The torrent must already have metadata resolved (call after PartialDownload).
+func (d *Downloader) DownloadFileHeader(ctx context.Context, infoHash string, filePath string, minBytes int) (localPath string, err error) {
+	hash := metainfo.NewHashFromHex(infoHash)
+	t, ok := d.client.Torrent(hash)
+	if !ok {
+		return "", fmt.Errorf("torrent %s not found", TruncHash(infoHash))
+	}
+
+	// Guard against stale torrent handles (consistent with other Downloader methods).
+	defer func() {
+		if r := recover(); r != nil {
+			localPath = ""
+			err = fmt.Errorf("torrent handle invalid: %v", r)
+		}
+	}()
+
+	// Find the specific file
+	var target *torrent.File
+	for _, f := range t.Files() {
+		dp := f.DisplayPath()
+		if dp == filePath || f.Path() == filePath || strings.HasSuffix(dp, filePath) {
+			target = f
+			break
+		}
+	}
+	if target == nil {
+		return "", fmt.Errorf("file %s not found in torrent", filePath)
+	}
+
+	ext := strings.ToLower(filepath.Ext(target.DisplayPath()))
+	pieceLength := int(t.Info().PieceLength)
+	fileStartPiece := target.BeginPieceIndex()
+	fileEndPiece := target.EndPieceIndex()
+
+	piecesNeeded := (minBytes + pieceLength - 1) / pieceLength
+	startEnd := fileStartPiece + piecesNeeded
+	if startEnd > fileEndPiece {
+		startEnd = fileEndPiece
+	}
+
+	required := make(map[int]bool)
+	for i := fileStartPiece; i < startEnd; i++ {
+		required[i] = true
+	}
+
+	// For MP4/M4V: also get end pieces
+	if mp4Extensions[ext] {
+		endStart := fileEndPiece - piecesNeeded
+		if endStart < startEnd {
+			endStart = startEnd
+		}
+		for i := endStart; i < fileEndPiece; i++ {
+			required[i] = true
+		}
+	}
+
+	for i := range required {
+		t.Piece(i).SetPriority(torrent.PiecePriorityNow)
+	}
+
+	if err := d.waitForPieces(ctx, t, infoHash, required); err != nil {
+		return "", err
+	}
+
+	localPath = d.FindLocalFile(infoHash, filePath)
+	if localPath == "" {
+		return "", fmt.Errorf("file %s not found on disk after download", filePath)
+	}
+	return localPath, nil
+}
+
 func findLargestVideo(files []*torrent.File) (*torrent.File, error) {
 	var best *torrent.File
 	var bestSize int64

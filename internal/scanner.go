@@ -218,6 +218,21 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			media.Files = torrentFiles
 			media.Swarm = swarmInfo
 
+			// Propagate duration to the main video file in the file listing
+			if media.Video != nil && media.Video.Duration > 0 && torrentFiles != nil {
+				for i, vf := range torrentFiles.VideoFiles {
+					if vf.Path == dlResult.FileName || strings.HasSuffix(vf.Path, "/"+dlResult.FileName) {
+						torrentFiles.VideoFiles[i].Duration = media.Video.Duration
+						break
+					}
+				}
+			}
+
+			// Probe duration for other video files in multi-file torrents
+			if torrentFiles != nil && len(torrentFiles.VideoFiles) > 1 {
+				probeOtherVideoDurations(ctx, dl, infoHash, ffprobePath, dlResult.FileName, torrentFiles, cfg.Verbose)
+			}
+
 			// Detect language for single "und" audio tracks
 			ApplyLangDetection(ctx, langCfg, media, dlResult.FilePath)
 
@@ -281,6 +296,36 @@ func TruncHash(h string) string {
 		return h[:8]
 	}
 	return h
+}
+
+// probeOtherVideoDurations downloads headers and probes duration for non-main video files.
+func probeOtherVideoDurations(ctx context.Context, dl *Downloader, infoHash, ffprobePath, mainFileName string, tf *TorrentFiles, verbose bool) {
+	const headerBytes = 2 * 1024 * 1024 // 2 MB
+
+	for i, vf := range tf.VideoFiles {
+		if vf.Duration > 0 {
+			continue // already has duration (main file)
+		}
+		if vf.Path == mainFileName || strings.HasSuffix(vf.Path, "/"+mainFileName) {
+			continue
+		}
+
+		localPath, err := dl.DownloadFileHeader(ctx, infoHash, vf.Path, headerBytes)
+		if err != nil {
+			if verbose {
+				log.Printf("  [%s] duration probe skip %s: %v", TruncHash(infoHash), filepath.Base(vf.Path), err)
+			}
+			continue
+		}
+
+		dur := ProbeDuration(ctx, ffprobePath, localPath)
+		if dur > 0 {
+			tf.VideoFiles[i].Duration = dur
+			if verbose {
+				log.Printf("  [%s] duration probe %s: %.1fs", TruncHash(infoHash), filepath.Base(vf.Path), dur)
+			}
+		}
+	}
 }
 
 // getExePath returns the path to the current executable.

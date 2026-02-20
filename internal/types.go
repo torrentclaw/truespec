@@ -54,9 +54,10 @@ type VideoInfo struct {
 	Width     int     `json:"width"`
 	Height    int     `json:"height"`
 	BitDepth  int     `json:"bitDepth"`
-	HDR       string  `json:"hdr"`       // HDR10, HLG, DV, DV+HDR10, "" if SDR
-	FrameRate float64 `json:"frameRate"` // e.g. 23.976
-	Profile   string  `json:"profile"`   // e.g. "Main 10", "High"
+	HDR       string  `json:"hdr"`                // HDR10, HLG, DV, DV+HDR10, "" if SDR
+	FrameRate float64 `json:"frameRate"`          // e.g. 23.976
+	Profile   string  `json:"profile"`            // e.g. "Main 10", "High"
+	Duration  float64 `json:"duration,omitempty"` // seconds
 }
 
 // TorrentFiles contains the complete file listing of a torrent with threat analysis.
@@ -74,11 +75,12 @@ type TorrentFiles struct {
 
 // FileInfo represents a single file within a torrent.
 type FileInfo struct {
-	Path   string        `json:"path"`
-	Size   int64         `json:"size"`
-	Ext    string        `json:"ext"`
-	Reason string        `json:"reason,omitempty"` // why it's suspicious
-	VT     *VTFileReport `json:"vt,omitempty"`     // VirusTotal scan result
+	Path     string        `json:"path"`
+	Size     int64         `json:"size"`
+	Ext      string        `json:"ext"`
+	Duration float64       `json:"duration,omitempty"` // seconds, video files only
+	Reason   string        `json:"reason,omitempty"`   // why it's suspicious
+	VT       *VTFileReport `json:"vt,omitempty"`       // VirusTotal scan result
 }
 
 // SwarmInfo contains live peer/seeder data from the BitTorrent swarm.
