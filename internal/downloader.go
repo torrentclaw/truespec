@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 )
@@ -77,6 +78,7 @@ func NewDownloader(cfg DownloadConfig) (*Downloader, error) {
 	tcfg.Seed = false
 	tcfg.NoUpload = true
 	tcfg.ListenPort = 0 // random port
+	tcfg.Logger = alog.Default.FilterLevel(alog.Disabled)
 
 	client, err := torrent.NewClient(tcfg)
 	if err != nil {
@@ -196,7 +198,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	case <-t.GotInfo():
 		// Metadata resolved
 	case <-metaCtx.Done():
-		return nil, fmt.Errorf("metadata timeout for %s", infoHash[:8])
+		return nil, fmt.Errorf("metadata timeout for %s", TruncHash(infoHash))
 	}
 
 	// Find largest video file
@@ -208,7 +210,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 	ext := strings.ToLower(filepath.Ext(videoFile.DisplayPath()))
 
 	if d.cfg.Verbose {
-		log.Printf("  [%s] found video: %s (%d MB, %s)", infoHash[:8], videoFile.DisplayPath(), videoFile.Length()/1024/1024, ext)
+		log.Printf("  [%s] found video: %s (%d MB, %s)", TruncHash(infoHash), videoFile.DisplayPath(), videoFile.Length()/1024/1024, ext)
 	}
 
 	// Calculate required pieces
@@ -241,13 +243,13 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		}
 		if d.cfg.Verbose {
 			log.Printf("  [%s] MP4 detected: also requesting last %d pieces (moov atom)",
-				infoHash[:8], fileEndPiece-endStart)
+				TruncHash(infoHash), fileEndPiece-endStart)
 		}
 	}
 
 	if d.cfg.Verbose {
 		log.Printf("  [%s] need %d pieces (%dKB each) for %dKB",
-			infoHash[:8], len(required), pieceLength/1024, minBytes/1024)
+			TruncHash(infoHash), len(required), pieceLength/1024, minBytes/1024)
 	}
 
 	// Set priority on required pieces
@@ -359,14 +361,14 @@ func (d *Downloader) resolveFilePath(t *torrent.Torrent, videoFile *torrent.File
 		if attempt < 2 {
 			time.Sleep(1 * time.Second)
 			if d.cfg.Verbose {
-				log.Printf("  [%s] file not found on disk, retrying (%d/3)...", infoHash[:8], attempt+2)
+				log.Printf("  [%s] file not found on disk, retrying (%d/3)...", TruncHash(infoHash), attempt+2)
 			}
 		}
 	}
 
 	if filePath == "" {
 		d.logFileNotFound(infoHash, tName, vPath, vDisplay)
-		return "", fmt.Errorf("downloaded file not found on disk for %s", infoHash[:8])
+		return "", fmt.Errorf("downloaded file not found on disk for %s", TruncHash(infoHash))
 	}
 
 	return filePath, nil
@@ -374,7 +376,7 @@ func (d *Downloader) resolveFilePath(t *torrent.Torrent, videoFile *torrent.File
 
 // logFileNotFound prints diagnostic info when a downloaded file can't be located.
 func (d *Downloader) logFileNotFound(infoHash, tName, vPath, vDisplay string) {
-	log.Printf("  [%s] file not found", infoHash[:8])
+	log.Printf("  [%s] file not found", TruncHash(infoHash))
 	log.Printf("    torrent name: %s", tName)
 	log.Printf("    video Path(): %s", vPath)
 	log.Printf("    video DisplayPath(): %s", vDisplay)
@@ -403,7 +405,7 @@ func (d *Downloader) RequestMorePieces(ctx context.Context, infoHash string, min
 	hash := metainfo.NewHashFromHex(infoHash)
 	t, ok := d.client.Torrent(hash)
 	if !ok {
-		return fmt.Errorf("torrent %s not found in client", infoHash[:8])
+		return fmt.Errorf("torrent %s not found in client", TruncHash(infoHash))
 	}
 
 	videoFile, err := findLargestVideo(t.Files())
@@ -441,7 +443,7 @@ func (d *Downloader) RequestMorePieces(ctx context.Context, infoHash string, min
 
 	if d.cfg.Verbose {
 		log.Printf("  [%s] requesting %d more pieces for %dKB retry",
-			infoHash[:8], len(required), minBytes/1024)
+			TruncHash(infoHash), len(required), minBytes/1024)
 	}
 
 	for i := range required {
@@ -468,7 +470,7 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline:
-			return fmt.Errorf("max timeout (%s) for %s", d.cfg.MaxTimeout, infoHash[:8])
+			return fmt.Errorf("max timeout (%s) for %s", d.cfg.MaxTimeout, TruncHash(infoHash))
 		case <-ticker.C:
 			// Check piece completion
 			allComplete := true
@@ -507,12 +509,12 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 
 			if pieceStall && byteStall {
 				return fmt.Errorf("stall: no progress for %s for %s",
-					now.Sub(lastPieceAt).Round(time.Second), infoHash[:8])
+					now.Sub(lastPieceAt).Round(time.Second), TruncHash(infoHash))
 			}
 
 			if d.cfg.Verbose && completed > 0 {
 				log.Printf("  [%s] pieces %d/%d peers=%d",
-					infoHash[:8], completed, len(required), stats.ActivePeers)
+					TruncHash(infoHash), completed, len(required), stats.ActivePeers)
 			}
 		}
 	}
@@ -572,7 +574,7 @@ func (d *Downloader) DownloadFullFile(ctx context.Context, infoHash string, file
 	hash := metainfo.NewHashFromHex(infoHash)
 	t, ok := d.client.Torrent(hash)
 	if !ok {
-		return "", fmt.Errorf("torrent %s not found", infoHash[:8])
+		return "", fmt.Errorf("torrent %s not found", TruncHash(infoHash))
 	}
 
 	defer func() {

@@ -296,17 +296,17 @@ func ApplyLangDetection(ctx context.Context, cfg LangDetectConfig, result *ScanR
 	indices := undefinedTrackIndices(result.Audio)
 	maxT := effectiveMaxTracks(cfg)
 	if len(indices) > maxT {
-		log.Printf("  [%s] %d undefined audio tracks, capping to %d", truncHash(result.InfoHash), len(indices), maxT)
+		log.Printf("  [%s] %d undefined audio tracks, capping to %d", TruncHash(result.InfoHash), len(indices), maxT)
 		indices = indices[:maxT]
 	}
 
 	log.Printf("  [%s] %d audio track(s) with unknown language, attempting whisper detection...",
-		truncHash(result.InfoHash), len(indices))
+		TruncHash(result.InfoHash), len(indices))
 
 	for _, i := range indices {
 		detected, err := DetectAudioLanguage(ctx, cfg, videoPath, i)
 		if err != nil {
-			log.Printf("  [%s] language detection failed for track %d: %v", truncHash(result.InfoHash), i, err)
+			log.Printf("  [%s] language detection failed for track %d: %v", TruncHash(result.InfoHash), i, err)
 			continue
 		}
 
@@ -317,7 +317,7 @@ func ApplyLangDetection(ctx context.Context, cfg LangDetectConfig, result *ScanR
 		normalized := NormalizeLang(detected.Language)
 
 		log.Printf("  [%s] track %d: detected language: %s (confidence: %.1f%%, took %dms)",
-			truncHash(result.InfoHash), i, normalized, detected.Confidence*100, detected.ElapsedMs)
+			TruncHash(result.InfoHash), i, normalized, detected.Confidence*100, detected.ElapsedMs)
 
 		result.Audio[i].Lang = normalized
 

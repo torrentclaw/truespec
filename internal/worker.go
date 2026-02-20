@@ -194,7 +194,7 @@ func processOneIsolated(ctx context.Context, exePath string, input WorkerInput) 
 // with the shared Downloader (original behavior).
 func processOneInProcess(ctx context.Context, dl *Downloader, cfg Config, hash string, idx, total int) (ScanResult, int64, int64) {
 	if cfg.Verbose {
-		log.Printf("[%d/%d] scanning %s (in-process)", idx, total, truncHash(hash))
+		log.Printf("[%d/%d] scanning %s (in-process)", idx, total, TruncHash(hash))
 	}
 
 	result := processOne(ctx, dl, cfg, hash)

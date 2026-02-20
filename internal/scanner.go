@@ -125,7 +125,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				if cfg.Verbose && !useIsolation {
 					// In-process mode logs are already written by processOneInProcess
 					log.Printf("[%d/%d] %s -> %s (%dms, dl=%d)",
-						idx+1, len(hashes), truncHash(h), result.Status, result.ElapsedMs, downloaded)
+						idx+1, len(hashes), TruncHash(h), result.Status, result.ElapsedMs, downloaded)
 				}
 			}(hash, i)
 		}
@@ -203,10 +203,10 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 		media, err := ExtractMediaInfo(ctx, ffprobePath, dlResult.FilePath)
 		if cfg.Verbose {
 			if err != nil {
-				log.Printf("  [%s] ffprobe error: %v", truncHash(infoHash), err)
+				log.Printf("  [%s] ffprobe error: %v", TruncHash(infoHash), err)
 			} else if media != nil {
 				log.Printf("  [%s] ffprobe result: audio=%d subs=%d video=%v",
-					truncHash(infoHash), len(media.Audio), len(media.Subtitles), media.Video != nil)
+					TruncHash(infoHash), len(media.Audio), len(media.Subtitles), media.Video != nil)
 			}
 		}
 		if err == nil && media != nil && len(media.Audio) > 0 {
@@ -230,7 +230,7 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 			minBytes *= 2
 			if cfg.Verbose {
 				log.Printf("  [%s] ffprobe failed (attempt %d/%d), requesting more data (%dKB)",
-					truncHash(infoHash), attempt+1, cfg.MaxFFprobeRetries, minBytes/1024)
+					TruncHash(infoHash), attempt+1, cfg.MaxFFprobeRetries, minBytes/1024)
 			}
 
 			if err := dl.RequestMorePieces(ctx, infoHash, minBytes); err != nil {
@@ -276,7 +276,7 @@ func errorResult(infoHash string, err error, start time.Time) ScanResult {
 	}
 }
 
-func truncHash(h string) string {
+func TruncHash(h string) string {
 	if len(h) > 8 {
 		return h[:8]
 	}

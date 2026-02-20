@@ -696,7 +696,7 @@ func executeScan(cfg internal.Config, hashes []string) {
 
 		if cfg.Verbose {
 			log.Printf("  [%d/%d] %s → %s (%dms)",
-				len(collected), len(hashes), result.InfoHash[:8], result.Status, result.ElapsedMs)
+				len(collected), len(hashes), internal.TruncHash(result.InfoHash), result.Status, result.ElapsedMs)
 		}
 	}
 
@@ -832,14 +832,16 @@ func runWorker() {
 	originalStdout := os.Stdout
 	os.Stdout = os.Stderr
 
+	infoHash := "unknown" // default until input decode; used by panic handler
+
 	// Ensure we write a result even if we panic
 	defer func() {
 		if r := recover(); r != nil {
-			// Panic during worker execution
 			output := internal.WorkerOutput{
 				Result: internal.ScanResult{
-					Status: "worker_error",
-					Error:  fmt.Sprintf("panic: %v", r),
+					InfoHash: infoHash,
+					Status:   "worker_error",
+					Error:    fmt.Sprintf("panic: %v", r),
 				},
 			}
 			_ = json.NewEncoder(originalStdout).Encode(output)
@@ -860,6 +862,7 @@ func runWorker() {
 		_ = json.NewEncoder(originalStdout).Encode(output)
 		os.Exit(1)
 	}
+	infoHash = input.InfoHash
 
 	// Configure logging to stderr (already redirected)
 	log.SetOutput(os.Stderr)
