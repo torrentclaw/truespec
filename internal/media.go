@@ -55,7 +55,7 @@ var hdrProfiles = map[[2]string]string{
 // ExtractMediaInfo runs ffprobe on a file and parses audio, subtitle, and video streams.
 func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*ScanResult, error) {
 	cmd := exec.CommandContext(ctx, ffprobePath,
-		"-v", "quiet",
+		"-v", "error",
 		"-print_format", "json",
 		"-show_streams",
 		"-show_format",

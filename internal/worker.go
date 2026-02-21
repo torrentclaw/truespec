@@ -73,10 +73,8 @@ func RunWorker(input WorkerInput) WorkerOutput {
 	}
 	defer dl.Close()
 
-	// Configurar logging con prefijo si verbose
+	// Configurar logging si verbose (sin SetPrefix: el padre ya añade [worker:xxx] via prefixWriter)
 	if input.Verbose {
-		prefix := fmt.Sprintf("[worker:%s] ", input.InfoHash[:8])
-		log.SetPrefix(prefix)
 		log.Printf("[%d/%d] starting worker", input.Index, input.Total)
 	}
 
