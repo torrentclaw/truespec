@@ -39,14 +39,19 @@ Given torrent info hashes, magnet links, or `.torrent` files, TrueSpec:
 - **Flexible input** — accepts info hashes, magnet links, `.torrent` files, or folders of `.torrent` files
 - **Partial download** — only fetches the minimum bytes needed, not the full file (typically < 20 MB)
 - **Parallel scanning** with configurable concurrency
+- **Subprocess isolation** — each scan runs in an isolated subprocess for crash resilience (SIGBUS/SIGSEGV recovery)
 - **Smart piece selection** — handles MP4 moov atoms at end of file
 - **Stall detection** and automatic retries with increasing byte thresholds
+- **Video duration** — extracts duration (seconds) for the main video and secondary video files
 - **Language normalization** — maps all language tags to ISO 639-1 codes
-- **Whisper language detection** — detects audio language for "und" tracks using whisper.cpp (offline, CPU-only)
+- **Whisper language detection** — detects audio language for "und" tracks using whisper.cpp (offline, CPU-only, up to N tracks configurable via `whisper_max_tracks`)
 - **File threat analysis** — scans torrent contents for dangerous files (executables, scripts, suspicious patterns)
 - **VirusTotal integration** — checks suspicious files against 70+ antivirus engines (free API, no file uploads for known hashes)
 - **Statistics tracking** — persistent scan stats with hourly/daily breakdowns, quality distribution, traffic totals
-- **Configuration wizard** — `truespec config` for first-time setup (Whisper, VirusTotal, scan defaults)
+- **Configuration wizard** — `truespec config` for first-time setup (Whisper, VirusTotal, scan defaults, output mode)
+- **Configurable verbose levels** — normal mode shows compact progress display with logs to rotating file; verbose mode prints all logs to stderr
+- **Log rotation** — detailed logs written to `~/.truespec/logs/truespec.log` with automatic size-based rotation (10 MB max, 5 files)
+- **Progress display** — live spinner with scan counters in normal mode: `⠹ Scanning [3/10]  ✓ 2  ✗ 1  (12s)`
 - **Cross-platform** — Linux, macOS, Windows (amd64 & arm64)
 
 ## Installation
@@ -137,7 +142,7 @@ truespec stats --reset
 | `--max-timeout` | | `600` | Absolute max seconds per torrent |
 | `--ffprobe` | | auto | Path to ffprobe binary |
 | `--temp-dir` | | OS temp + `/truespec` | Temp directory for downloads |
-| `--verbose` | `-v` | `false` | Print progress to stderr |
+| `--verbose` | `-v` | `false` | Print all logs to stderr (overrides config verbose level) |
 | `--output` | `-o` | `results_<timestamp>.json` | Output file path |
 | `-f` | | | Read hashes/magnets from file |
 | `--stdin` | | `false` | Read hashes/magnets from stdin |
@@ -196,7 +201,8 @@ Results are saved as JSON:
         "bitDepth": 10,
         "hdr": "HDR10",
         "frameRate": 23.976,
-        "profile": "Main 10"
+        "profile": "Main 10",
+        "duration": 7200.5
       },
       "audio": [
         { "lang": "en", "codec": "ac3", "channels": 6, "default": true }
@@ -208,7 +214,7 @@ Results are saved as JSON:
       "files": {
         "total": 5,
         "total_size": 4500000000,
-        "video_files": [{"path": "Movie.mkv", "size": 4400000000, "ext": ".mkv"}],
+        "video_files": [{"path": "Movie.mkv", "size": 4400000000, "ext": ".mkv", "duration": 7200.5}],
         "audio_files": [],
         "sub_files": [],
         "image_files": [],
@@ -253,7 +259,10 @@ Results are saved as JSON:
 | `stall_download` | Timed out during piece download |
 | `no_video` | No video file found in the torrent |
 | `ffprobe_failed` | ffprobe could not extract metadata |
+| `file_not_found` | Downloaded file could not be located on disk |
 | `timeout` | Exceeded absolute max timeout |
+| `worker_crashed` | Worker subprocess crashed (SIGBUS, SIGSEGV, panic) |
+| `worker_error` | Worker subprocess exited with non-zero code |
 | `error` | Unexpected error |
 
 ### Threat Levels
@@ -282,7 +291,9 @@ Results are saved as JSON:
 │   ├── input.go             # Input normalization (hash, magnet, .torrent)
 │   ├── lang.go              # Language code normalization
 │   ├── langdetect.go        # Whisper-based audio language detection
+│   ├── logrotate.go         # Rotating log writer (size-based, 10MB/5 files)
 │   ├── media.go             # ffprobe integration & metadata extraction
+│   ├── progress.go          # Live progress display (spinner + counters)
 │   ├── scanner.go           # Scan orchestration & retry logic
 │   ├── stats.go             # Persistent statistics tracking
 │   ├── threat.go            # File threat detection (30+ extensions)
@@ -290,7 +301,8 @@ Results are saved as JSON:
 │   ├── userconfig.go        # User configuration (~/.truespec/config.json)
 │   ├── virustotal.go        # VirusTotal API v3 client
 │   ├── vtscan.go            # VT integration for scan results
-│   └── whisper_download.go  # Auto-download whisper-cli & models
+│   ├── whisper_download.go  # Auto-download whisper-cli & models
+│   └── worker.go            # Subprocess worker isolation & crash handling
 ├── examples/
 │   └── hashes.txt           # Sample info hashes
 ├── .github/
@@ -313,6 +325,9 @@ Results are saved as JSON:
 - [x] **Whisper language detection** — offline audio language detection for "und" tracks
 - [x] **Statistics tracking** — persistent scan stats with quality distribution
 - [x] **Configuration wizard** — interactive setup for all features
+- [x] **Subprocess isolation** — crash-resilient worker processes with signal recovery
+- [x] **Video duration extraction** — duration field for main and secondary video files
+- [x] **Configurable verbose & log rotation** — normal/verbose modes, rotating log files, progress display
 - [ ] **TorrentClaw API integration** — `truespec scan --push` to submit verified specs directly to the [torrentclaw.com](https://torrentclaw.com) central database
 - [ ] **Daemon mode** — run as a background service that continuously processes hashes from a queue
 - [ ] **Docker image** — prebuilt container with ffprobe and whisper included

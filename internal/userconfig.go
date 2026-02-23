@@ -36,6 +36,9 @@ type UserConfig struct {
 	StallTimeout int `json:"stall_timeout"` // seconds before killing stalled torrent
 	MaxTimeout   int `json:"max_timeout"`   // absolute max seconds per torrent
 
+	// Output
+	VerboseLevel int `json:"verbose_level"` // 0=normal (progress+logfile), 1=verbose (all to stderr)
+
 	// Meta
 	Configured bool `json:"configured"` // true after first run of `truespec config`
 }
@@ -50,6 +53,7 @@ func DefaultUserConfig() UserConfig {
 		Concurrency:       5,
 		StallTimeout:      90,
 		MaxTimeout:        600,
+		VerboseLevel:      VerboseNormal,
 		Configured:        false,
 	}
 }
@@ -144,6 +148,8 @@ func (c *UserConfig) ApplyToConfig(cfg *Config) {
 	if c.MaxTimeout > 0 {
 		cfg.MaxTimeout = time.Duration(c.MaxTimeout) * time.Second
 	}
+
+	cfg.VerboseLevel = c.VerboseLevel
 }
 
 // ShowConfig returns a human-readable summary of the current configuration.
@@ -174,6 +180,10 @@ func (c *UserConfig) ShowConfig() string {
 	s += fmt.Sprintf("\n  Concurrency:          %d\n", c.Concurrency)
 	s += fmt.Sprintf("  Stall timeout:        %ds\n", c.StallTimeout)
 	s += fmt.Sprintf("  Max timeout:          %ds\n", c.MaxTimeout)
+	s += fmt.Sprintf("\n  Output mode:          %s\n", VerboseLevelLabel(c.VerboseLevel))
+	if c.VerboseLevel == VerboseNormal {
+		s += fmt.Sprintf("  Log directory:        %s\n", LogDirPath())
+	}
 	s += fmt.Sprintf("\n  Config file:          %s\n", UserConfigPath())
 	s += fmt.Sprintf("  Configured:           %s\n", yn(c.Configured))
 

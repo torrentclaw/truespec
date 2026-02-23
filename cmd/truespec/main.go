@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -270,6 +271,29 @@ func runConfigWizard() {
 	cfg.StallTimeout, _ = strconv.Atoi(stallStr)
 	cfg.MaxTimeout, _ = strconv.Atoi(maxStr)
 
+	// ── Section 5: Output & Logging ──
+	verboseLevelStr := strconv.Itoa(cfg.VerboseLevel)
+	outputForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Default output mode").
+				Description("Controls what you see during scans.\n"+
+					"Normal: compact progress bar, detailed logs saved to file.\n"+
+					"Verbose: all logs printed to terminal.").
+				Options(
+					huh.NewOption("Normal (progress bar, logs to file)", "0"),
+					huh.NewOption("Verbose (all logs to terminal)", "1"),
+				).
+				Value(&verboseLevelStr),
+		).Title("Output & Logging"),
+	)
+
+	if err := outputForm.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Cancelled.\n")
+		os.Exit(0)
+	}
+	cfg.VerboseLevel, _ = strconv.Atoi(verboseLevelStr)
+
 	// Mark as configured
 	cfg.Configured = true
 
@@ -454,6 +478,7 @@ func runInteractive() {
 				}),
 			huh.NewConfirm().
 				Title("Enable verbose output?").
+				Description("Shows all logs on terminal instead of saving to file.").
 				Value(&verbose),
 			huh.NewInput().
 				Title("Output file (leave empty for auto-generated)").
@@ -469,7 +494,9 @@ func runInteractive() {
 
 	// Apply options
 	cfg.Concurrency, _ = strconv.Atoi(concurrencyStr)
-	cfg.Verbose = verbose
+	if verbose {
+		cfg.VerboseLevel = internal.VerboseVerbose
+	}
 	cfg.OutputFile = outputFile
 
 	// Collect hashes from interactive input
@@ -540,8 +567,9 @@ func runScan(args []string) {
 
 	fs.StringVar(&cfg.FFprobePath, "ffprobe", cfg.FFprobePath, "Path to ffprobe binary (auto-detect if empty)")
 	fs.StringVar(&cfg.TempDir, "temp-dir", cfg.TempDir, "Temporary directory for downloads")
-	fs.BoolVar(&cfg.Verbose, "verbose", false, "Print progress logs to stderr")
-	fs.BoolVar(&cfg.Verbose, "v", false, "Print progress logs to stderr (shorthand)")
+	var verbose bool
+	fs.BoolVar(&verbose, "verbose", false, "Print all logs to stderr (overrides config verbose level)")
+	fs.BoolVar(&verbose, "v", false, "Print all logs to stderr (shorthand)")
 	fs.StringVar(&cfg.OutputFile, "output", "", "Output JSON file path (default: results_<timestamp>.json)")
 	fs.StringVar(&cfg.OutputFile, "o", "", "Output JSON file path (default: results_<timestamp>.json)")
 	fs.StringVar(&cfg.StatsFile, "stats-file", cfg.StatsFile, "Path to stats file")
@@ -613,6 +641,10 @@ func runScan(args []string) {
 		cfg.StatsFile = ""
 	}
 
+	if verbose {
+		cfg.VerboseLevel = internal.VerboseVerbose
+	}
+
 	executeScan(cfg, hashes)
 }
 
@@ -622,12 +654,35 @@ func executeScan(cfg internal.Config, hashes []string) {
 		cfg.OutputFile = fmt.Sprintf("results_%s.json", time.Now().Format("2006-01-02_150405"))
 	}
 
-	// Configure logging: verbose logs go to stderr
-	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ltime)
-	if !cfg.Verbose {
-		log.SetOutput(devNull{})
+
+	var logCloser io.Closer
+	if cfg.IsVerbose() {
+		// Verbose: all logs to stderr (traditional behavior)
+		log.SetOutput(os.Stderr)
+		cfg.LogWriter = os.Stderr
+	} else {
+		// Normal: logs to rotating file, progress display on stderr
+		rlw, rlwErr := internal.NewRotatingLogWriter(
+			internal.LogDirPath(),
+			internal.DefaultLogMaxBytes,
+			internal.DefaultLogMaxFiles,
+		)
+		if rlwErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not create log file: %v\n", rlwErr)
+			log.SetOutput(os.Stderr)
+			cfg.LogWriter = os.Stderr
+		} else {
+			log.SetOutput(rlw)
+			cfg.LogWriter = rlw
+			logCloser = rlw
+		}
 	}
+	defer func() {
+		if logCloser != nil {
+			logCloser.Close()
+		}
+	}()
 
 	// Validate hashes (should be 40-char hex strings)
 	for i, h := range hashes {
@@ -672,6 +727,14 @@ func executeScan(cfg internal.Config, hashes []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Progress display for normal mode (started before scan so no results are missed)
+	var progress *internal.ProgressDisplay
+	if !cfg.IsVerbose() {
+		isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+		progress = internal.NewProgressDisplay(os.Stderr, len(hashes), isTTY)
+		progress.Start()
+	}
+
 	// Run scan and collect results (with stats tracking)
 	start := time.Now()
 	results := internal.ScanWithStats(ctx, cfg, hashes, stats)
@@ -694,10 +757,16 @@ func executeScan(cfg internal.Config, hashes []string) {
 		collected = append(collected, result)
 		scanStats[result.Status]++
 
-		if cfg.Verbose {
-			log.Printf("  [%d/%d] %s → %s (%dms)",
-				len(collected), len(hashes), internal.TruncHash(result.InfoHash), result.Status, result.ElapsedMs)
+		if progress != nil {
+			progress.RecordResult(result.Status)
 		}
+
+		log.Printf("  [%d/%d] %s → %s (%dms)",
+			len(collected), len(hashes), internal.TruncHash(result.InfoHash), result.Status, result.ElapsedMs)
+	}
+
+	if progress != nil {
+		progress.Stop()
 	}
 
 	elapsed := time.Since(start)
@@ -788,11 +857,6 @@ func cleanTempDir(dir string) {
 	}
 }
 
-// devNull is an io.Writer that discards all output.
-type devNull struct{}
-
-func (devNull) Write(p []byte) (int, error) { return len(p), nil }
-
 // ensureClassicFileIO prevents SIGBUS crashes from mmap-based piece hashing in
 // the anacrolix/torrent storage layer. The library defaults to mmap file I/O
 // on Linux, which causes fatal bus errors when files are truncated during
@@ -864,12 +928,10 @@ func runWorker() {
 	}
 	infoHash = input.InfoHash
 
-	// Configure logging to stderr (already redirected)
+	// Workers always log to stderr — the parent process routes their stderr
+	// to the appropriate destination (terminal or rotating log file).
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ltime)
-	if !input.Verbose {
-		log.SetOutput(devNull{})
-	}
 
 	// Run the worker
 	output := internal.RunWorker(input)

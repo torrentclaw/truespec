@@ -22,7 +22,6 @@ func TestWorkerProtocol_RoundTrip(t *testing.T) {
 		MinBytesMKV:  10 * 1024 * 1024,
 		MinBytesMP4:  20 * 1024 * 1024,
 		MaxRetries:   3,
-		Verbose:      true,
 	}
 
 	data, err := json.Marshal(input)
@@ -88,8 +87,8 @@ func TestPrefixWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if n != 6 { // original input length
-		t.Logf("write returned %d, len(input)=6", n)
+	if n != 6 {
+		t.Errorf("write returned %d, want 6 (len of input)", n)
 	}
 
 	want := "[test] hello\n"
@@ -217,7 +216,6 @@ func TestProcessOneInProcess_Timing(t *testing.T) {
 	// Create a minimal config
 	cfg := Config{
 		TempDir:           os.TempDir(),
-		Verbose:           false,
 		MinBytesMKV:       1024,
 		MinBytesMP4:       1024,
 		MaxFFprobeRetries: 0,

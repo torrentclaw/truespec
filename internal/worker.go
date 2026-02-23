@@ -27,7 +27,6 @@ type WorkerInput struct {
 	MinBytesMKV    int    `json:"min_bytes_mkv"`
 	MinBytesMP4    int    `json:"min_bytes_mp4"`
 	MaxRetries     int    `json:"max_retries"`
-	Verbose        bool   `json:"verbose"`
 }
 
 // WorkerOutput is written to the original stdout file descriptor.
@@ -62,7 +61,6 @@ func RunWorker(input WorkerInput) WorkerOutput {
 		TempDir:      subdir,
 		StallTimeout: time.Duration(input.StallTimeout) * time.Second,
 		MaxTimeout:   time.Duration(input.MaxTimeout) * time.Second,
-		Verbose:      input.Verbose,
 		MinBytesMKV:  input.MinBytesMKV,
 		MinBytesMP4:  input.MinBytesMP4,
 	})
@@ -73,16 +71,12 @@ func RunWorker(input WorkerInput) WorkerOutput {
 	}
 	defer dl.Close()
 
-	// Configurar logging si verbose (sin SetPrefix: el padre ya añade [worker:xxx] via prefixWriter)
-	if input.Verbose {
-		log.Printf("[%d/%d] starting worker", input.Index, input.Total)
-	}
+	log.Printf("[%d/%d] starting worker", input.Index, input.Total)
 
 	// Construir Config para processOne
 	cfg := Config{
 		FFprobePath:       input.FFprobePath,
 		TempDir:           subdir,
-		Verbose:           input.Verbose,
 		MinBytesMKV:       input.MinBytesMKV,
 		MinBytesMP4:       input.MinBytesMP4,
 		MaxFFprobeRetries: input.MaxRetries,
@@ -103,10 +97,8 @@ func RunWorker(input WorkerInput) WorkerOutput {
 	// Cleanup del torrent
 	dl.Cleanup(input.InfoHash)
 
-	if input.Verbose {
-		log.Printf("[%d/%d] worker done: status=%s dl=%d up=%d",
-			input.Index, input.Total, result.Status, downloaded, uploaded)
-	}
+	log.Printf("[%d/%d] worker done: status=%s dl=%d up=%d",
+		input.Index, input.Total, result.Status, downloaded, uploaded)
 
 	return WorkerOutput{
 		Result:     result,
@@ -117,7 +109,8 @@ func RunWorker(input WorkerInput) WorkerOutput {
 
 // processOneIsolated executes a torrent scan in an isolated subprocess.
 // It spawns the subprocess, communicates via stdin/stdout, and handles crashes.
-func processOneIsolated(ctx context.Context, exePath string, input WorkerInput) (WorkerOutput, error) {
+// logWriter receives the worker's stderr (via prefixWriter); nil defaults to os.Stderr.
+func processOneIsolated(ctx context.Context, exePath string, input WorkerInput, logWriter io.Writer) (WorkerOutput, error) {
 	// Serializar input
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
@@ -135,10 +128,14 @@ func processOneIsolated(ctx context.Context, exePath string, input WorkerInput) 
 	}
 	defer stdout.Close()
 
-	// stderr del worker → prefixWriter
+	// stderr del worker → prefixWriter → logWriter (or os.Stderr)
+	stderrDest := logWriter
+	if stderrDest == nil {
+		stderrDest = os.Stderr
+	}
 	cmd.Stderr = &prefixWriter{
 		prefix: []byte(fmt.Sprintf("[worker:%s] ", input.InfoHash[:8])),
-		w:      os.Stderr,
+		w:      stderrDest,
 	}
 
 	// Iniciar proceso
@@ -191,9 +188,7 @@ func processOneIsolated(ctx context.Context, exePath string, input WorkerInput) 
 // processOneInProcess is the fallback that processes a torrent in-process
 // with the shared Downloader (original behavior).
 func processOneInProcess(ctx context.Context, dl *Downloader, cfg Config, hash string, idx, total int) (ScanResult, int64, int64) {
-	if cfg.Verbose {
-		log.Printf("[%d/%d] scanning %s (in-process)", idx, total, TruncHash(hash))
-	}
+	log.Printf("[%d/%d] scanning %s (in-process)", idx, total, TruncHash(hash))
 
 	result := processOne(ctx, dl, cfg, hash)
 	downloaded, uploaded := dl.GetTorrentStats(hash)
@@ -210,37 +205,28 @@ type prefixWriter struct {
 }
 
 func (p *prefixWriter) Write(data []byte) (int, error) {
-	total := 0
 	for _, b := range data {
 		p.buf = append(p.buf, b)
 		if b == '\n' {
-			// Write line with prefix
-			if _, err := p.w.Write(p.prefix); err != nil {
-				return total, err
+			line := make([]byte, 0, len(p.prefix)+len(p.buf))
+			line = append(line, p.prefix...)
+			line = append(line, p.buf...)
+			if _, err := p.w.Write(line); err != nil {
+				return 0, err
 			}
-			n, err := p.w.Write(p.buf)
-			total += n
-			if err != nil {
-				return total, err
-			}
-			p.buf = p.buf[:0] // reset
+			p.buf = p.buf[:0]
 		}
 	}
-	// Write any remaining without prefix (incomplete line)
 	if len(p.buf) > 0 {
-		n, err := p.w.Write(p.prefix)
-		total += n
-		if err != nil {
-			return total, err
-		}
-		n, err = p.w.Write(p.buf)
-		total += n
-		if err != nil {
-			return total, err
+		line := make([]byte, 0, len(p.prefix)+len(p.buf))
+		line = append(line, p.prefix...)
+		line = append(line, p.buf...)
+		if _, err := p.w.Write(line); err != nil {
+			return 0, err
 		}
 		p.buf = p.buf[:0]
 	}
-	return total, nil
+	return len(data), nil
 }
 
 func workerCrashResult(infoHash, reason string) WorkerOutput {

@@ -34,7 +34,6 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				TempDir:      cfg.TempDir,
 				StallTimeout: cfg.StallTimeout,
 				MaxTimeout:   cfg.MaxTimeout,
-				Verbose:      cfg.Verbose,
 				MinBytesMKV:  cfg.MinBytesMKV,
 				MinBytesMP4:  cfg.MinBytesMP4,
 			})
@@ -53,9 +52,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				return
 			}
 			defer dl.Close()
-			if cfg.Verbose {
-				log.Printf("subprocess isolation unavailable, using in-process mode: %v", exeErr)
-			}
+			log.Printf("subprocess isolation unavailable, using in-process mode: %v", exeErr)
 		}
 
 		sem := make(chan struct{}, cfg.Concurrency)
@@ -94,7 +91,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				if useIsolation {
 					// Subprocess isolation mode
 					workerInput := cfg.ToWorkerInput(h, idx+1, len(hashes))
-					workerOutput, wErr := processOneIsolated(ctx, exePath, workerInput)
+					workerOutput, wErr := processOneIsolated(ctx, exePath, workerInput, cfg.LogWriter)
 					if wErr != nil {
 						result = ScanResult{
 							InfoHash:  h,
@@ -122,8 +119,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 
 				results <- result
 
-				if cfg.Verbose && !useIsolation {
-					// In-process mode logs are already written by processOneInProcess
+				if !useIsolation {
 					log.Printf("[%d/%d] %s -> %s (%dms, dl=%d)",
 						idx+1, len(hashes), TruncHash(h), result.Status, result.ElapsedMs, downloaded)
 				}
@@ -201,13 +197,11 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 	// Try ffprobe, with retries requesting more data
 	for attempt := 0; attempt <= cfg.MaxFFprobeRetries; attempt++ {
 		media, err := ExtractMediaInfo(ctx, ffprobePath, dlResult.FilePath)
-		if cfg.Verbose {
-			if err != nil {
-				log.Printf("  [%s] ffprobe error: %v", TruncHash(infoHash), err)
-			} else if media != nil {
-				log.Printf("  [%s] ffprobe result: audio=%d subs=%d video=%v",
-					TruncHash(infoHash), len(media.Audio), len(media.Subtitles), media.Video != nil)
-			}
+		if err != nil {
+			log.Printf("  [%s] ffprobe error: %v", TruncHash(infoHash), err)
+		} else if media != nil {
+			log.Printf("  [%s] ffprobe result: audio=%d subs=%d video=%v",
+				TruncHash(infoHash), len(media.Audio), len(media.Subtitles), media.Video != nil)
 		}
 		if err == nil && media != nil && len(media.Audio) > 0 {
 			// Success!
@@ -230,7 +224,7 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 
 			// Probe duration for other video files in multi-file torrents
 			if torrentFiles != nil && len(torrentFiles.VideoFiles) > 1 {
-				probeOtherVideoDurations(ctx, dl, infoHash, ffprobePath, dlResult.FileName, torrentFiles, cfg.Verbose)
+				probeOtherVideoDurations(ctx, dl, infoHash, ffprobePath, dlResult.FileName, torrentFiles)
 			}
 
 			// Detect language for single "und" audio tracks
@@ -243,10 +237,8 @@ func processOne(ctx context.Context, dl *Downloader, cfg Config, infoHash string
 		// ffprobe failed — request more data without re-downloading from scratch
 		if attempt < cfg.MaxFFprobeRetries {
 			minBytes *= 2
-			if cfg.Verbose {
-				log.Printf("  [%s] ffprobe failed (attempt %d/%d), requesting more data (%dKB)",
-					TruncHash(infoHash), attempt+1, cfg.MaxFFprobeRetries, minBytes/1024)
-			}
+			log.Printf("  [%s] ffprobe failed (attempt %d/%d), requesting more data (%dKB)",
+				TruncHash(infoHash), attempt+1, cfg.MaxFFprobeRetries, minBytes/1024)
 
 			if err := dl.RequestMorePieces(ctx, infoHash, minBytes); err != nil {
 				result := errorResult(infoHash, err, start)
@@ -299,7 +291,7 @@ func TruncHash(h string) string {
 }
 
 // probeOtherVideoDurations downloads headers and probes duration for non-main video files.
-func probeOtherVideoDurations(ctx context.Context, dl *Downloader, infoHash, ffprobePath, mainFileName string, tf *TorrentFiles, verbose bool) {
+func probeOtherVideoDurations(ctx context.Context, dl *Downloader, infoHash, ffprobePath, mainFileName string, tf *TorrentFiles) {
 	const headerBytes = 2 * 1024 * 1024 // 2 MB
 
 	for i, vf := range tf.VideoFiles {
@@ -312,18 +304,14 @@ func probeOtherVideoDurations(ctx context.Context, dl *Downloader, infoHash, ffp
 
 		localPath, err := dl.DownloadFileHeader(ctx, infoHash, vf.Path, headerBytes)
 		if err != nil {
-			if verbose {
-				log.Printf("  [%s] duration probe skip %s: %v", TruncHash(infoHash), filepath.Base(vf.Path), err)
-			}
+			log.Printf("  [%s] duration probe skip %s: %v", TruncHash(infoHash), filepath.Base(vf.Path), err)
 			continue
 		}
 
 		dur := ProbeDuration(ctx, ffprobePath, localPath)
 		if dur > 0 {
 			tf.VideoFiles[i].Duration = dur
-			if verbose {
-				log.Printf("  [%s] duration probe %s: %.1fs", TruncHash(infoHash), filepath.Base(vf.Path), dur)
-			}
+			log.Printf("  [%s] duration probe %s: %.1fs", TruncHash(infoHash), filepath.Base(vf.Path), dur)
 		}
 	}
 }

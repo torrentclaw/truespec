@@ -15,7 +15,6 @@ import (
 type VTScanConfig struct {
 	APIKey  string // VirusTotal API key
 	Enabled bool   // whether VT scanning is enabled
-	Verbose bool   // log progress
 }
 
 // EnrichWithVirusTotal scans suspicious files against VirusTotal.
@@ -37,9 +36,7 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 	for i := range files.Suspicious {
 		f := &files.Suspicious[i]
 
-		if cfg.Verbose {
-			log.Printf("  [%s] VT: checking %s (%s)", TruncHash(infoHash), filepath.Base(f.Path), HumanizeBytes(f.Size))
-		}
+		log.Printf("  [%s] VT: checking %s (%s)", TruncHash(infoHash), filepath.Base(f.Path), HumanizeBytes(f.Size))
 
 		// Try to find file on disk
 		localPath := findLocalFile(dl, infoHash, f.Path)
@@ -49,9 +46,7 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 			var err error
 			sha, err = fileSHA256(localPath)
 			if err != nil {
-				if cfg.Verbose {
-					log.Printf("  [%s] VT: sha256 error for %s: %v", TruncHash(infoHash), f.Path, err)
-				}
+				log.Printf("  [%s] VT: sha256 error for %s: %v", TruncHash(infoHash), f.Path, err)
 				continue
 			}
 		}
@@ -60,9 +55,7 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 		if sha != "" {
 			report, err := client.LookupHash(ctx, sha)
 			if err != nil {
-				if cfg.Verbose {
-					log.Printf("  [%s] VT: lookup error: %v", TruncHash(infoHash), err)
-				}
+				log.Printf("  [%s] VT: lookup error: %v", TruncHash(infoHash), err)
 				f.VT = &VTFileReport{Status: "vt_error"}
 				continue
 			}
@@ -70,20 +63,16 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 			if report != nil {
 				report.Permalink = fmt.Sprintf("%s/%s", vtWebURL, sha)
 				f.VT = report
-				if cfg.Verbose {
-					log.Printf("  [%s] VT: %s → %s (%d/%d)", TruncHash(infoHash),
-						filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
-				}
+				log.Printf("  [%s] VT: %s → %s (%d/%d)", TruncHash(infoHash),
+					filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
 				continue
 			}
 		}
 
 		// Step 2: Not in VT — check if uploadable
 		if f.Size > vtMaxUploadB {
-			if cfg.Verbose {
-				log.Printf("  [%s] VT: %s too large for upload (%s > %dMB)",
-					TruncHash(infoHash), filepath.Base(f.Path), HumanizeBytes(f.Size), vtMaxUploadMB)
-			}
+			log.Printf("  [%s] VT: %s too large for upload (%s > %dMB)",
+				TruncHash(infoHash), filepath.Base(f.Path), HumanizeBytes(f.Size), vtMaxUploadMB)
 			f.VT = &VTFileReport{Status: "suspicious_unscanned"}
 			continue
 		}
@@ -91,9 +80,7 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 		// Download the full file if needed
 		fullPath, err := ensureFullFile(ctx, dl, infoHash, f.Path)
 		if err != nil {
-			if cfg.Verbose {
-				log.Printf("  [%s] VT: could not get full file: %v", TruncHash(infoHash), err)
-			}
+			log.Printf("  [%s] VT: could not get full file: %v", TruncHash(infoHash), err)
 			f.VT = &VTFileReport{Status: "suspicious_unscanned"}
 			continue
 		}
@@ -110,47 +97,35 @@ func EnrichWithVirusTotal(ctx context.Context, cfg VTScanConfig, files *TorrentF
 		if err == nil && report != nil {
 			report.Permalink = fmt.Sprintf("%s/%s", vtWebURL, sha)
 			f.VT = report
-			if cfg.Verbose {
-				log.Printf("  [%s] VT: %s found after full download → %s (%d/%d)", TruncHash(infoHash),
-					filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
-			}
+			log.Printf("  [%s] VT: %s found after full download → %s (%d/%d)", TruncHash(infoHash),
+				filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
 			continue
 		}
 
 		// Upload to VT
-		if cfg.Verbose {
-			log.Printf("  [%s] VT: uploading %s to VirusTotal...", TruncHash(infoHash), filepath.Base(f.Path))
-		}
+		log.Printf("  [%s] VT: uploading %s to VirusTotal...", TruncHash(infoHash), filepath.Base(f.Path))
 
 		analysisID, err := client.UploadFile(ctx, fullPath)
 		if err != nil {
-			if cfg.Verbose {
-				log.Printf("  [%s] VT: upload failed: %v", TruncHash(infoHash), err)
-			}
+			log.Printf("  [%s] VT: upload failed: %v", TruncHash(infoHash), err)
 			f.VT = &VTFileReport{Status: "vt_error"}
 			continue
 		}
 
 		// Poll for result
-		if cfg.Verbose {
-			log.Printf("  [%s] VT: waiting for analysis...", TruncHash(infoHash))
-		}
+		log.Printf("  [%s] VT: waiting for analysis...", TruncHash(infoHash))
 
 		report, err = client.PollAnalysis(ctx, analysisID)
 		if err != nil {
-			if cfg.Verbose {
-				log.Printf("  [%s] VT: poll failed: %v", TruncHash(infoHash), err)
-			}
+			log.Printf("  [%s] VT: poll failed: %v", TruncHash(infoHash), err)
 			f.VT = &VTFileReport{Status: "vt_error"}
 			continue
 		}
 
 		report.Permalink = fmt.Sprintf("%s/%s", vtWebURL, sha)
 		f.VT = report
-		if cfg.Verbose {
-			log.Printf("  [%s] VT: %s → %s (%d/%d) [uploaded]", TruncHash(infoHash),
-				filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
-		}
+		log.Printf("  [%s] VT: %s → %s (%d/%d) [uploaded]", TruncHash(infoHash),
+			filepath.Base(f.Path), report.Status, report.Detections, report.TotalEngines)
 	}
 
 	// Update threat level based on VT results

@@ -1,10 +1,17 @@
 package internal
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
+)
+
+// Verbose levels control where log output goes and whether a progress display is shown.
+const (
+	VerboseNormal  = 0 // compact progress display on stderr, detailed logs to rotating file
+	VerboseVerbose = 1 // all logs to stderr (traditional --verbose behavior)
 )
 
 // Config holds all runtime configuration for truespec.
@@ -14,8 +21,9 @@ type Config struct {
 	MaxTimeout   time.Duration
 	FFprobePath  string
 	TempDir      string
-	Verbose      bool
-	OutputFile   string // empty = stdout
+	VerboseLevel int       // 0=normal (progress+logfile), 1=verbose (all to stderr)
+	LogWriter    io.Writer // destination for worker stderr routing; set by executeScan, not serialized
+	OutputFile   string    // empty = stdout
 
 	// Download thresholds
 	MinBytesMKV int // bytes to download for MKV (headers at start)
@@ -26,6 +34,21 @@ type Config struct {
 
 	// Stats
 	StatsFile string // path to persistent stats JSON file
+}
+
+// IsVerbose returns true when the verbose level is set to full verbose output.
+func (c Config) IsVerbose() bool {
+	return c.VerboseLevel >= VerboseVerbose
+}
+
+// VerboseLevelLabel returns a human-readable label for a verbose level.
+func VerboseLevelLabel(level int) string {
+	switch level {
+	case VerboseVerbose:
+		return "verbose"
+	default:
+		return "normal"
+	}
 }
 
 // DefaultConfig returns a Config with sensible defaults, overridden by env vars.
@@ -82,6 +105,5 @@ func (c Config) ToWorkerInput(infoHash string, index, total int) WorkerInput {
 		MinBytesMKV:    c.MinBytesMKV,
 		MinBytesMP4:    c.MinBytesMP4,
 		MaxRetries:     c.MaxFFprobeRetries,
-		Verbose:        c.Verbose,
 	}
 }

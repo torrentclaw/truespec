@@ -41,7 +41,6 @@ type DownloadConfig struct {
 	TempDir      string
 	StallTimeout time.Duration
 	MaxTimeout   time.Duration
-	Verbose      bool
 	MinBytesMKV  int
 	MinBytesMP4  int
 }
@@ -209,9 +208,7 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 
 	ext := strings.ToLower(filepath.Ext(videoFile.DisplayPath()))
 
-	if d.cfg.Verbose {
-		log.Printf("  [%s] found video: %s (%d MB, %s)", TruncHash(infoHash), videoFile.DisplayPath(), videoFile.Length()/1024/1024, ext)
-	}
+	log.Printf("  [%s] found video: %s (%d MB, %s)", TruncHash(infoHash), videoFile.DisplayPath(), videoFile.Length()/1024/1024, ext)
 
 	// Calculate required pieces
 	pieceLength := int(t.Info().PieceLength)
@@ -241,16 +238,12 @@ func (d *Downloader) PartialDownload(ctx context.Context, infoHash string, minBy
 		for i := endStart; i < fileEndPiece; i++ {
 			required[i] = true
 		}
-		if d.cfg.Verbose {
-			log.Printf("  [%s] MP4 detected: also requesting last %d pieces (moov atom)",
-				TruncHash(infoHash), fileEndPiece-endStart)
-		}
+		log.Printf("  [%s] MP4 detected: also requesting last %d pieces (moov atom)",
+			TruncHash(infoHash), fileEndPiece-endStart)
 	}
 
-	if d.cfg.Verbose {
-		log.Printf("  [%s] need %d pieces (%dKB each) for %dKB",
-			TruncHash(infoHash), len(required), pieceLength/1024, minBytes/1024)
-	}
+	log.Printf("  [%s] need %d pieces (%dKB each) for %dKB",
+		TruncHash(infoHash), len(required), pieceLength/1024, minBytes/1024)
 
 	// Set priority on required pieces
 	for i := range required {
@@ -360,9 +353,7 @@ func (d *Downloader) resolveFilePath(t *torrent.Torrent, videoFile *torrent.File
 		}
 		if attempt < 2 {
 			time.Sleep(1 * time.Second)
-			if d.cfg.Verbose {
-				log.Printf("  [%s] file not found on disk, retrying (%d/3)...", TruncHash(infoHash), attempt+2)
-			}
+			log.Printf("  [%s] file not found on disk, retrying (%d/3)...", TruncHash(infoHash), attempt+2)
 		}
 	}
 
@@ -441,10 +432,8 @@ func (d *Downloader) RequestMorePieces(ctx context.Context, infoHash string, min
 		}
 	}
 
-	if d.cfg.Verbose {
-		log.Printf("  [%s] requesting %d more pieces for %dKB retry",
-			TruncHash(infoHash), len(required), minBytes/1024)
-	}
+	log.Printf("  [%s] requesting %d more pieces for %dKB retry",
+		TruncHash(infoHash), len(required), minBytes/1024)
 
 	for i := range required {
 		t.Piece(i).SetPriority(torrent.PiecePriorityNow)
@@ -512,7 +501,7 @@ func (d *Downloader) waitForPieces(ctx context.Context, t *torrent.Torrent, info
 					now.Sub(lastPieceAt).Round(time.Second), TruncHash(infoHash))
 			}
 
-			if d.cfg.Verbose && completed > 0 {
+			if completed > 0 {
 				log.Printf("  [%s] pieces %d/%d peers=%d",
 					TruncHash(infoHash), completed, len(required), stats.ActivePeers)
 			}
