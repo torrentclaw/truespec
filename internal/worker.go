@@ -71,7 +71,7 @@ func RunWorker(input WorkerInput) WorkerOutput {
 	}
 	defer dl.Close()
 
-	log.Printf("[%d/%d] starting worker", input.Index, input.Total)
+	log.Printf("[%s] starting worker", workerTag(input.Index, input.Total))
 
 	// Construir Config para processOne
 	cfg := Config{
@@ -97,14 +97,23 @@ func RunWorker(input WorkerInput) WorkerOutput {
 	// Cleanup del torrent
 	dl.Cleanup(input.InfoHash)
 
-	log.Printf("[%d/%d] worker done: status=%s dl=%d up=%d",
-		input.Index, input.Total, result.Status, downloaded, uploaded)
+	log.Printf("[%s] worker done: status=%s dl=%d up=%d",
+		workerTag(input.Index, input.Total), result.Status, downloaded, uploaded)
 
 	return WorkerOutput{
 		Result:     result,
 		Downloaded: downloaded,
 		Uploaded:   uploaded,
 	}
+}
+
+// workerTag formats a worker index tag for log messages.
+// Returns "[idx/total]" when total is known, "[idx]" otherwise (pipe mode).
+func workerTag(index, total int) string {
+	if total > 0 {
+		return fmt.Sprintf("%d/%d", index, total)
+	}
+	return fmt.Sprintf("%d", index)
 }
 
 // processOneIsolated executes a torrent scan in an isolated subprocess.
@@ -188,7 +197,7 @@ func processOneIsolated(ctx context.Context, exePath string, input WorkerInput, 
 // processOneInProcess is the fallback that processes a torrent in-process
 // with the shared Downloader (original behavior).
 func processOneInProcess(ctx context.Context, dl *Downloader, cfg Config, hash string, idx, total int) (ScanResult, int64, int64) {
-	log.Printf("[%d/%d] scanning %s (in-process)", idx, total, TruncHash(hash))
+	log.Printf("[%s] scanning %s (in-process)", workerTag(idx, total), TruncHash(hash))
 
 	result := processOne(ctx, dl, cfg, hash)
 	downloaded, uploaded := dl.GetTorrentStats(hash)

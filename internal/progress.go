@@ -101,9 +101,15 @@ func (p *ProgressDisplay) render() {
 	spinner := spinnerFrames[frame%len(spinnerFrames)]
 	elapsed := time.Since(p.started).Round(time.Second)
 
-	// ⠹ Scanning [3/10]  ✓ 2  ✗ 1  (12s)
-	line := fmt.Sprintf("\r\033[K%s Scanning [%d/%d]  \033[32m✓ %d\033[0m  \033[31m✗ %d\033[0m  (%s)",
-		spinner, completed, total, succeeded, failed, elapsed)
+	// ⠹ Scanning [3/10]  ✓ 2  ✗ 1  (12s)   — or [3] when total is unknown
+	var progress string
+	if total > 0 {
+		progress = fmt.Sprintf("[%d/%d]", completed, total)
+	} else {
+		progress = fmt.Sprintf("[%d]", completed)
+	}
+	line := fmt.Sprintf("\r\033[K%s Scanning %s  \033[32m✓ %d\033[0m  \033[31m✗ %d\033[0m  (%s)",
+		spinner, progress, succeeded, failed, elapsed)
 
 	fmt.Fprint(p.w, line)
 }

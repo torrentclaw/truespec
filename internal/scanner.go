@@ -11,38 +11,42 @@ import (
 	"time"
 )
 
-// ScanWithStats is like Scan but also records stats for each result.
-// The stats object is updated concurrently (caller must not access it until channel is closed).
+// ScanFromChannel reads info hashes from a channel and scans them concurrently,
+// emitting results via the returned channel as each torrent completes.
+// The input channel can be fed continuously (pipe mode) or pre-filled and closed (batch mode).
+// The results channel is closed after all in-flight workers finish and the input channel is drained.
 //
 // Internally, it tries to use subprocess isolation for crash resilience.
 // If os.Executable() fails (e.g., in minimal containers), it falls back to
 // in-process execution with a shared Downloader (original behavior).
-func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stats) <-chan ScanResult {
+func ScanFromChannel(ctx context.Context, cfg Config, hashes <-chan string, stats *Stats, total int) <-chan ScanResult {
 	results := make(chan ScanResult, cfg.Concurrency)
 
 	go func() {
 		defer close(results)
 
 		// Try to get executable path for subprocess isolation
-		exePath, exeErr := getExePath()
-		useIsolation := exeErr == nil
+		exePath, exePathErr := getExePath()
+		useIsolation := exePathErr == nil
 
 		var dl *Downloader
 		if !useIsolation {
 			// Fallback: create shared downloader for in-process mode
-			dl, exeErr = NewDownloader(DownloadConfig{
+			var dlErr error
+			dl, dlErr = NewDownloader(DownloadConfig{
 				TempDir:      cfg.TempDir,
 				StallTimeout: cfg.StallTimeout,
 				MaxTimeout:   cfg.MaxTimeout,
 				MinBytesMKV:  cfg.MinBytesMKV,
 				MinBytesMP4:  cfg.MinBytesMP4,
 			})
-			if exeErr != nil {
-				for _, h := range hashes {
+			if dlErr != nil {
+				// Drain the input channel to avoid blocking the sender
+				for h := range hashes {
 					result := ScanResult{
 						InfoHash: h,
 						Status:   "error",
-						Error:    "failed to create downloader: " + exeErr.Error(),
+						Error:    "failed to create downloader: " + dlErr.Error(),
 					}
 					if stats != nil {
 						stats.RecordResult(result, 0)
@@ -52,34 +56,24 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 				return
 			}
 			defer dl.Close()
-			log.Printf("subprocess isolation unavailable, using in-process mode: %v", exeErr)
+			log.Printf("subprocess isolation unavailable, using in-process mode: %v", exePathErr)
 		}
 
 		sem := make(chan struct{}, cfg.Concurrency)
 		var wg sync.WaitGroup
 		var mu sync.Mutex // protects stats
+		var counter int
 
-		for i, hash := range hashes {
+		for hash := range hashes {
+			// Acquire concurrency slot (blocks when all workers are busy)
 			select {
 			case <-ctx.Done():
-				for _, h := range hashes[i:] {
-					result := ScanResult{
-						InfoHash: h,
-						Status:   "error",
-						Error:    "cancelled",
-					}
-					if stats != nil {
-						mu.Lock()
-						stats.RecordResult(result, 0)
-						mu.Unlock()
-					}
-					results <- result
-				}
 				wg.Wait()
 				return
 			case sem <- struct{}{}:
 			}
 
+			counter++
 			wg.Add(1)
 			go func(h string, idx int) {
 				defer wg.Done()
@@ -90,7 +84,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 
 				if useIsolation {
 					// Subprocess isolation mode
-					workerInput := cfg.ToWorkerInput(h, idx+1, len(hashes))
+					workerInput := cfg.ToWorkerInput(h, idx, total)
 					workerOutput, wErr := processOneIsolated(ctx, exePath, workerInput, cfg.LogWriter)
 					if wErr != nil {
 						result = ScanResult{
@@ -106,7 +100,7 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 					}
 				} else {
 					// Fallback in-process mode
-					result, downloaded, uploaded = processOneInProcess(ctx, dl, cfg, h, idx+1, len(hashes))
+					result, downloaded, uploaded = processOneInProcess(ctx, dl, cfg, h, idx, total)
 				}
 
 				// Record stats
@@ -117,19 +111,38 @@ func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stat
 					mu.Unlock()
 				}
 
+				result.Normalize()
 				results <- result
 
 				if !useIsolation {
-					log.Printf("[%d/%d] %s -> %s (%dms, dl=%d)",
-						idx+1, len(hashes), TruncHash(h), result.Status, result.ElapsedMs, downloaded)
+					log.Printf("[%s] %s → %s (%dms, dl=%d)",
+						workerTag(idx, total), TruncHash(h), result.Status, result.ElapsedMs, downloaded)
 				}
-			}(hash, i)
+			}(hash, counter)
 		}
 
 		wg.Wait()
 	}()
 
 	return results
+}
+
+// ScanWithStats scans a fixed list of info hashes concurrently, recording stats for each result.
+// The stats object is updated concurrently (caller must not access it until channel is closed).
+// This is a convenience wrapper around ScanFromChannel for batch mode.
+func ScanWithStats(ctx context.Context, cfg Config, hashes []string, stats *Stats) <-chan ScanResult {
+	bufSize := cfg.Concurrency * 2
+	if bufSize > len(hashes) {
+		bufSize = len(hashes)
+	}
+	ch := make(chan string, bufSize)
+	go func() {
+		defer close(ch)
+		for _, h := range hashes {
+			ch <- h
+		}
+	}()
+	return ScanFromChannel(ctx, cfg, ch, stats, len(hashes))
 }
 
 // Scan processes a list of info hashes concurrently, returning results via channel.

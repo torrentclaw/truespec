@@ -66,6 +66,7 @@ Usage:
   truespec scan [flags] <input> [input...]
   truespec scan [flags] -f <file>
   truespec scan [flags] --stdin
+  truespec scan [flags] --pipe
   truespec stats [--json] [--reset]
   truespec config [--show] [--json] [--reset]
   truespec version
@@ -86,6 +87,7 @@ Examples:
   truespec scan ./torrents/
   truespec scan -f hashes.txt -o my-results.json
   cat hashes.txt | truespec scan --stdin --verbose
+  cat hashes.txt | truespec scan --pipe
   truespec stats
   truespec stats --json
   truespec config
@@ -576,9 +578,11 @@ func runScan(args []string) {
 
 	var fromFile string
 	var fromStdin bool
+	var pipeMode bool
 	var noStats bool
 	fs.StringVar(&fromFile, "f", "", "Read info hashes/magnets from file (one per line)")
 	fs.BoolVar(&fromStdin, "stdin", false, "Read info hashes/magnets from stdin")
+	fs.BoolVar(&pipeMode, "pipe", false, "Pipe mode: read hashes from stdin continuously, emit JSONL results to stdout")
 	fs.BoolVar(&noStats, "no-stats", false, "Disable stats tracking for this scan")
 
 	fs.Parse(args)
@@ -586,6 +590,30 @@ func runScan(args []string) {
 	// Apply parsed durations (CLI flags override user config)
 	cfg.StallTimeout = time.Duration(stallSec) * time.Second
 	cfg.MaxTimeout = time.Duration(maxSec) * time.Second
+
+	if noStats {
+		cfg.StatsFile = ""
+	}
+
+	if verbose {
+		cfg.VerboseLevel = internal.VerboseVerbose
+	}
+
+	// Validate mutually exclusive flags
+	if pipeMode && fromStdin {
+		fmt.Fprintln(os.Stderr, "Error: --pipe and --stdin are mutually exclusive")
+		os.Exit(1)
+	}
+	if pipeMode && (fromFile != "" || len(fs.Args()) > 0) {
+		fmt.Fprintln(os.Stderr, "Error: --pipe cannot be combined with positional arguments or -f")
+		os.Exit(1)
+	}
+
+	// Pipe mode: continuous stdin → JSONL stdout (no upfront hash collection needed)
+	if pipeMode {
+		executePipe(cfg)
+		return
+	}
 
 	// Collect info hashes from all sources
 	var hashes []string
@@ -637,14 +665,6 @@ func runScan(args []string) {
 		os.Exit(1)
 	}
 
-	if noStats {
-		cfg.StatsFile = ""
-	}
-
-	if verbose {
-		cfg.VerboseLevel = internal.VerboseVerbose
-	}
-
 	executeScan(cfg, hashes)
 }
 
@@ -654,35 +674,10 @@ func executeScan(cfg internal.Config, hashes []string) {
 		cfg.OutputFile = fmt.Sprintf("results_%s.json", time.Now().Format("2006-01-02_150405"))
 	}
 
-	log.SetFlags(log.Ltime)
-
-	var logCloser io.Closer
-	if cfg.IsVerbose() {
-		// Verbose: all logs to stderr (traditional behavior)
-		log.SetOutput(os.Stderr)
-		cfg.LogWriter = os.Stderr
-	} else {
-		// Normal: logs to rotating file, progress display on stderr
-		rlw, rlwErr := internal.NewRotatingLogWriter(
-			internal.LogDirPath(),
-			internal.DefaultLogMaxBytes,
-			internal.DefaultLogMaxFiles,
-		)
-		if rlwErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not create log file: %v\n", rlwErr)
-			log.SetOutput(os.Stderr)
-			cfg.LogWriter = os.Stderr
-		} else {
-			log.SetOutput(rlw)
-			cfg.LogWriter = rlw
-			logCloser = rlw
-		}
+	logCloser := setupLogging(&cfg)
+	if logCloser != nil {
+		defer logCloser.Close()
 	}
-	defer func() {
-		if logCloser != nil {
-			logCloser.Close()
-		}
-	}()
 
 	// Validate hashes (should be 40-char hex strings)
 	for i, h := range hashes {
@@ -711,17 +706,7 @@ func executeScan(cfg internal.Config, hashes []string) {
 	// Partial downloads are never resumable, so there's zero value in keeping them.
 	cleanTempDir(cfg.TempDir)
 
-	// Load stats
-	var stats *internal.Stats
-	if cfg.StatsFile != "" {
-		stats, err = internal.LoadStats(cfg.StatsFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not load stats: %v\n", err)
-			stats = internal.NewStats()
-		}
-		stats.Version = version
-		stats.RecordSession()
-	}
+	stats := loadStats(cfg.StatsFile)
 
 	// Context with signal handling for graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -743,17 +728,6 @@ func executeScan(cfg internal.Config, hashes []string) {
 	var collected []internal.ScanResult
 
 	for result := range results {
-		// Ensure slices are never nil (always [] in JSON, not null)
-		if result.Audio == nil {
-			result.Audio = []internal.AudioTrack{}
-		}
-		if result.Subtitles == nil {
-			result.Subtitles = []internal.SubtitleTrack{}
-		}
-		if result.Languages == nil {
-			result.Languages = []string{}
-		}
-
 		collected = append(collected, result)
 		scanStats[result.Status]++
 
@@ -799,14 +773,7 @@ func executeScan(cfg internal.Config, hashes []string) {
 	// Post-scan cleanup: remove all temp files (partial downloads are never resumable)
 	cleanTempDir(cfg.TempDir)
 
-	// Save stats
-	if stats != nil && cfg.StatsFile != "" {
-		stats.PruneOldBuckets()
-		stats.Compute()
-		if err := stats.Save(cfg.StatsFile); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not save stats: %v\n", err)
-		}
-	}
+	saveStats(stats, cfg.StatsFile)
 
 	// Print summary to stderr (always visible)
 	fmt.Fprintf(os.Stderr, "\nScan complete in %s\n", elapsed.Round(time.Millisecond))
@@ -817,6 +784,120 @@ func executeScan(cfg internal.Config, hashes []string) {
 	fmt.Fprintf(os.Stderr, "  Results saved to: %s\n", cfg.OutputFile)
 	if cfg.StatsFile != "" {
 		fmt.Fprintf(os.Stderr, "  Stats saved to: %s\n", cfg.StatsFile)
+	}
+}
+
+// executePipe runs in pipe mode: reads hashes from stdin continuously,
+// scans them with the configured concurrency, and emits each ScanResult
+// as a JSONL line on stdout as soon as it completes.
+// Closing stdin (EOF) signals "no more hashes"; the process finishes
+// remaining in-flight workers and exits cleanly.
+func executePipe(cfg internal.Config) {
+	logCloser := setupLogging(&cfg)
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+
+	// Resolve ffprobe early so we fail fast
+	ffprobePath, err := internal.ResolveFFprobe(cfg.FFprobePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.FFprobePath = ffprobePath
+
+	log.Printf("truespec %s — pipe mode (concurrency=%d)", version, cfg.Concurrency)
+	log.Printf("  stall timeout: %s", cfg.StallTimeout)
+	log.Printf("  max timeout: %s", cfg.MaxTimeout)
+	log.Printf("  ffprobe: %s", cfg.FFprobePath)
+	log.Printf("  temp dir: %s", cfg.TempDir)
+
+	// Startup cleanup
+	cleanTempDir(cfg.TempDir)
+
+	stats := loadStats(cfg.StatsFile)
+
+	// Context with signal handling for graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Read hashes from stdin continuously into a channel
+	hashes := make(chan string, cfg.Concurrency)
+	go func() {
+		defer close(hashes)
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			resolved, resolveErr := internal.NormalizeInput(line)
+			if resolveErr != nil {
+				log.Printf("pipe: skipping invalid input %q: %v", line, resolveErr)
+				continue
+			}
+			for _, h := range resolved {
+				select {
+				case hashes <- h:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if scanErr := scanner.Err(); scanErr != nil {
+			log.Printf("pipe: stdin read error: %v", scanErr)
+		}
+	}()
+
+	// Progress display (stderr only, stdout is for JSONL)
+	var progress *internal.ProgressDisplay
+	if !cfg.IsVerbose() {
+		isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+		progress = internal.NewProgressDisplay(os.Stderr, 0, isTTY)
+		progress.Start()
+	}
+
+	// Run scan from channel
+	start := time.Now()
+	results := internal.ScanFromChannel(ctx, cfg, hashes, stats, 0)
+
+	scanStats := map[string]int{}
+	encoder := json.NewEncoder(os.Stdout)
+	var total int
+
+	for result := range results {
+		total++
+		scanStats[result.Status]++
+
+		if progress != nil {
+			progress.RecordResult(result.Status)
+		}
+
+		// Emit JSONL line to stdout
+		if err := encoder.Encode(result); err != nil {
+			log.Printf("pipe: failed to encode result for %s: %v", internal.TruncHash(result.InfoHash), err)
+		}
+
+		log.Printf("  [%d] %s → %s (%dms)",
+			total, internal.TruncHash(result.InfoHash), result.Status, result.ElapsedMs)
+	}
+
+	if progress != nil {
+		progress.Stop()
+	}
+
+	elapsed := time.Since(start)
+
+	// Post-scan cleanup
+	cleanTempDir(cfg.TempDir)
+
+	saveStats(stats, cfg.StatsFile)
+
+	// Print summary to stderr
+	fmt.Fprintf(os.Stderr, "\nPipe session complete in %s\n", elapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Total: %d\n", total)
+	for status, count := range scanStats {
+		fmt.Fprintf(os.Stderr, "  %s: %d\n", status, count)
 	}
 }
 
@@ -832,7 +913,7 @@ func readAndNormalizeFile(path string) ([]string, error) {
 }
 
 // readAndNormalizeReader reads lines from a reader and normalizes each one.
-func readAndNormalizeReader(r *os.File) ([]string, error) {
+func readAndNormalizeReader(r io.Reader) ([]string, error) {
 	var hashes []string
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -847,6 +928,59 @@ func readAndNormalizeReader(r *os.File) ([]string, error) {
 		hashes = append(hashes, resolved...)
 	}
 	return hashes, scanner.Err()
+}
+
+// setupLogging configures log output based on verbose mode.
+// Returns a closer for the log file (nil if logging to stderr).
+func setupLogging(cfg *internal.Config) io.Closer {
+	log.SetFlags(log.Ltime)
+	if cfg.IsVerbose() {
+		log.SetOutput(os.Stderr)
+		cfg.LogWriter = os.Stderr
+		return nil
+	}
+	rlw, err := internal.NewRotatingLogWriter(
+		internal.LogDirPath(),
+		internal.DefaultLogMaxBytes,
+		internal.DefaultLogMaxFiles,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not create log file: %v\n", err)
+		log.SetOutput(os.Stderr)
+		cfg.LogWriter = os.Stderr
+		return nil
+	}
+	log.SetOutput(rlw)
+	cfg.LogWriter = rlw
+	return rlw
+}
+
+// loadStats loads scan statistics from disk, creating new stats if loading fails.
+// Returns nil if statsFile is empty (stats disabled).
+func loadStats(statsFile string) *internal.Stats {
+	if statsFile == "" {
+		return nil
+	}
+	stats, err := internal.LoadStats(statsFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load stats: %v\n", err)
+		stats = internal.NewStats()
+	}
+	stats.Version = version
+	stats.RecordSession()
+	return stats
+}
+
+// saveStats persists scan statistics to disk.
+func saveStats(stats *internal.Stats, statsFile string) {
+	if stats == nil || statsFile == "" {
+		return
+	}
+	stats.PruneOldBuckets()
+	stats.Compute()
+	if err := stats.Save(statsFile); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not save stats: %v\n", err)
+	}
 }
 
 // cleanTempDir removes the temp directory and all its contents.

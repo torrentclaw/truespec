@@ -30,6 +30,19 @@ type ScanResult struct {
 	Swarm *SwarmInfo `json:"swarm,omitempty"`
 }
 
+// Normalize ensures slice fields are never nil (always [] in JSON, not null).
+func (r *ScanResult) Normalize() {
+	if r.Audio == nil {
+		r.Audio = []AudioTrack{}
+	}
+	if r.Subtitles == nil {
+		r.Subtitles = []SubtitleTrack{}
+	}
+	if r.Languages == nil {
+		r.Languages = []string{}
+	}
+}
+
 // AudioTrack represents a single audio stream extracted by ffprobe.
 type AudioTrack struct {
 	Lang     string `json:"lang"`
